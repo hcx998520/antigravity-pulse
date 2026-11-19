@@ -23,12 +23,17 @@ const WORLD_NAME = 'AntigravityTokenMeterWorld';
 
 /**
  * 校验 CDP 目标是否属于可信 Antigravity 本地主窗口。
- * Antigravity 2.33+ 中，language_server 同时监听相邻的 HTTPS Hub 静态端口与 RPC 端口（例如 50066 与 50067），
- * 因此除严格同端口匹配外，亦放行同一 Electron CDP 实例下相邻端口（差值 <= 16）的本地 HTTPS 页面，
- * 同时继续严格拒绝第三方本地服务（如 3000/8080）、远程站点与 iframe。
+ * Antigravity 2.33+ 中，language_server 往往独立申请多组临时本地端口：
+ * - 有的启动下 HTTPS Hub 与 LS RPC 端口相邻（如 50066 vs 50067）；
+ * - 重启后两者可能相隔数千端口（如 LS RPC 53494、CDP 57951、HTTPS Hub 57953）；
+ * 因此除严格同端口匹配外，仅对同一 Electron CDP 实例下的本地 HTTPS 页面放行以下三类可信来源：
+ * 1. 与 LS RPC 端口相邻（差值 <= 32）；
+ * 2. 与 Electron CDP 端口相邻的高端口（>= 10000 且差值 <= 32）；
+ * 3. 操作系统动态临时端口段（>= 32768）且窗口标题带有 Antigravity 宿主标识。
+ * 同时继续严格拒绝非 HTTPS 回环页面、3000/5173/8080/8443 等常见本地开发服务、无标识高端口页面、远程站点与 iframe。
  * @param {any} target
  * @param {number} cdpPort
- * @param {number | null} [expectedHubPort] 宿主 language_server 端口（用于同端口或相邻 HTTPS Hub 端口校验）
+ * @param {number | null} [expectedHubPort] 宿主 language_server 端口（用于同端口或可信 HTTPS Hub 端口校验）
  */
 export function isTrustedHubTarget(target, cdpPort, expectedHubPort = null) {
   if (!target || typeof target !== 'object' || target.type !== 'page') return false;
@@ -42,8 +47,12 @@ export function isTrustedHubTarget(target, cdpPort, expectedHubPort = null) {
     if (expectedHubPort !== null) {
       const pagePort = pageUrl.port ? Number(pageUrl.port) : pageUrl.protocol === 'https:' ? 443 : 80;
       if (pagePort !== expectedHubPort) {
-        const isAdjacentHttpsHub = pageUrl.protocol === 'https:' && Math.abs(pagePort - expectedHubPort) <= 16;
-        if (!isAdjacentHttpsHub) return false;
+        if (pageUrl.protocol !== 'https:') return false;
+        const isAdjacentLsHub = Math.abs(pagePort - expectedHubPort) <= 32;
+        const isAdjacentCdpHub = pagePort >= 10000 && Math.abs(pagePort - cdpPort) <= 32;
+        const isEphemeralAntigravityWindow =
+          pagePort >= 32768 && typeof target.title === 'string' && /\bAntigravity\b/i.test(target.title);
+        if (!isAdjacentLsHub && !isAdjacentCdpHub && !isEphemeralAntigravityWindow) return false;
       }
     }
     return true;
