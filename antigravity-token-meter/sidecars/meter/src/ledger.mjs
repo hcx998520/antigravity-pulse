@@ -11,6 +11,7 @@
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { computeTokenCost, getModelPricing } from './pricing.mjs';
 
 const MAX_RECORDS = 10000;
 const MAX_DAYS = 400;
@@ -650,7 +651,34 @@ export class UsageLedger {
     let monthRequests = 0;
     let totalRequests = 0;
     let peakDay = null;
+    let todayCostUsd = 0;
+    let weekCostUsd = 0;
+    let monthCostUsd = 0;
     const daysList = [];
+
+    // Precompute per-model cost profile for proportional daily estimation when day entries aggregate tokens
+    const modelRatio = Object.create(null);
+    let totalModelCostUsd = 0;
+    let lifetimeCacheSavingsUsd = 0;
+    for (const [mName, mStats] of Object.entries(this.state.models)) {
+      const mTotal = Math.max(1, safeInt(mStats.total));
+      const c = computeTokenCost({
+        model: mName,
+        inputTokens: safeInt(mStats.input),
+        cacheReadTokens: safeInt(mStats.cacheRead),
+        outputTokens: safeInt(mStats.output),
+      }, now.getTime());
+      if (c) {
+        modelRatio[mName] = {
+          inFrac: safeInt(mStats.input) / mTotal,
+          cacheFrac: safeInt(mStats.cacheRead) / mTotal,
+          outFrac: safeInt(mStats.output) / mTotal,
+          totalUsd: c.costUsd,
+        };
+        totalModelCostUsd += c.costUsd;
+        lifetimeCacheSavingsUsd += c.cacheSavingsUsd;
+      }
+    }
 
     const sortedKeys = Object.keys(this.state.days).sort();
     const recentCutoffIndex = Math.max(0, sortedKeys.length - 35);
@@ -694,15 +722,48 @@ export class UsageLedger {
         output: safeInt(entry?.output),
         requests: reqs,
       };
-      // 近 35 天附带分模型消耗，支撑趋势图按模型筛选
-      if (idx >= recentCutoffIndex && entry?.byModel && typeof entry.byModel === 'object') {
+      let dayCostUsd = 0;
+      if (entry?.byModel && typeof entry.byModel === 'object') {
         const bm = {};
+        const bmc = {};
+        let attributed = 0;
         for (const [mKey, mVal] of Object.entries(entry.byModel)) {
           const v = safeInt(mVal);
-          if (v > 0) bm[String(mKey)] = v;
+          if (v > 0) {
+            const name = String(mKey);
+            bm[name] = v;
+            attributed += v;
+            const r = modelRatio[name];
+            const c = computeTokenCost({
+              model: name,
+              inputTokens: r ? v * r.inFrac : v * 0.04,
+              cacheReadTokens: r ? v * r.cacheFrac : v * 0.93,
+              outputTokens: r ? v * r.outFrac : v * 0.03,
+            }, now.getTime());
+            if (c) {
+              dayCostUsd += c.costUsd;
+              bmc[name] = Number(c.costUsd.toFixed(4));
+            }
+          }
         }
-        dayItem.byModel = bm;
+        if (t > attributed) {
+          const rem = t - attributed;
+          const remC = computeTokenCost({ model: 'Gemini 3.8 Flash', inputTokens: rem * 0.04, cacheReadTokens: rem * 0.93, outputTokens: rem * 0.03 }, now.getTime());
+          if (remC) dayCostUsd += remC.costUsd;
+        }
+        if (idx >= recentCutoffIndex) {
+          dayItem.byModel = bm;
+          dayItem.byModelCost = bmc;
+        }
+      } else if (t > 0) {
+        const estC = computeTokenCost({ model: 'Gemini 3.8 Flash', inputTokens: t * 0.04, cacheReadTokens: t * 0.93, outputTokens: t * 0.03 }, now.getTime());
+        if (estC) dayCostUsd = estC.costUsd;
       }
+      dayCostUsd = Number(dayCostUsd.toFixed(4));
+      dayItem.costUsd = dayCostUsd;
+      if (key === todayKey) todayCostUsd = dayCostUsd;
+      if (weekKeys.has(key)) weekCostUsd += dayCostUsd;
+      if (key.startsWith(monthPrefix)) monthCostUsd += dayCostUsd;
       daysList.push(dayItem);
     }
 
@@ -734,15 +795,21 @@ export class UsageLedger {
     }
 
     const modelRank = Object.entries(this.state.models)
-      .map(([name, m]) => ({
-        model: String(name),
-        totalTokens: safeInt(m.total),
-        outputTokens: safeInt(m.output),
-        thinkingTokens: safeInt(m.thinking),
-        cacheReadTokens: safeInt(m.cacheRead),
-        requests: safeInt(m.requests),
-        avgTps: m.streamingSec > 0 ? Number((m.timedOutput / m.streamingSec).toFixed(1)) : null,
-      }))
+      .map(([name, m]) => {
+        const pricing = getModelPricing(name, now);
+        const mr = modelRatio[name];
+        return {
+          model: String(name),
+          totalTokens: safeInt(m.total),
+          outputTokens: safeInt(m.output),
+          thinkingTokens: safeInt(m.thinking),
+          cacheReadTokens: safeInt(m.cacheRead),
+          requests: safeInt(m.requests),
+          avgTps: m.streamingSec > 0 ? Number((m.timedOutput / m.streamingSec).toFixed(1)) : null,
+          costUsd: mr ? Number(mr.totalUsd.toFixed(4)) : null,
+          pricing,
+        };
+      })
       .sort((a, b) => b.totalTokens - a.totalTokens)
       .slice(0, 20);
 
@@ -750,13 +817,16 @@ export class UsageLedger {
       todayDate: todayKey,
       monthKey: monthPrefix,
       todayTokens,
+      todayCostUsd: Number(todayCostUsd.toFixed(4)),
       todayInput,
       todayCacheRead,
       todayOutput,
       todayRequests,
       todayByModel,
       weekTokens,
+      weekCostUsd: Number(weekCostUsd.toFixed(4)),
       monthTokens,
+      monthCostUsd: Number(monthCostUsd.toFixed(4)),
       monthInput,
       monthCacheRead,
       monthOutput,
@@ -767,6 +837,8 @@ export class UsageLedger {
       longestStreak,
       activeDays: activeDateSet.size,
       totalTokens: safeInt(this.state.lifetimeTotal),
+      totalCostUsd: Number(totalModelCostUsd.toFixed(4)),
+      lifetimeCacheSavingsUsd: Number(lifetimeCacheSavingsUsd.toFixed(4)),
       importedUntil: this.state.importedUntil,
       days: daysList.slice(-365),
       modelRank,

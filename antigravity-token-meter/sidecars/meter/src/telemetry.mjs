@@ -7,6 +7,7 @@
  * - 账本去重键采用局部 SHA-256 不可逆哈希，不落盘原始会话 ID 或消息 ID。
  */
 import { createHash } from 'node:crypto';
+import { computeTokenCost } from './pricing.mjs';
 
 const MAX_METADATA_ITEMS = 5000;
 const INT_STR_RE = /^\d{1,15}$/;
@@ -602,11 +603,19 @@ export function computeConversationTelemetry({
     enrichedContext = { ...latestContext, estimatedTurnsLeft: estTurns };
   }
 
+  const resolvedModel = latestModel || latestSample?.model || null;
+  const costInfo = computeTokenCost({
+    model: resolvedModel,
+    inputTokens: totalUncachedInput + totalCacheWrite,
+    cacheReadTokens: totalCacheRead,
+    outputTokens: totalOutput,
+  });
+
   return {
     cascadeId,
     status: String(status || ''),
     running: status === 'CASCADE_RUN_STATUS_RUNNING',
-    model: latestModel || latestSample?.model || null,
+    model: resolvedModel,
     lastRequestTime,
     requests: ledgerEvents.length,
     measuredRequests,
@@ -617,6 +626,9 @@ export function computeConversationTelemetry({
     streamingSeconds: Number(weightedStreamingSec.toFixed(2)),
     cacheHitRate: cacheHitRate !== null ? Number(cacheHitRate.toFixed(4)) : null,
     thinkingRatio,
+    costUsd: costInfo ? costInfo.costUsd : null,
+    cacheSavingsUsd: costInfo ? costInfo.cacheSavingsUsd : null,
+    pricing: costInfo ? costInfo.pricing : null,
     tokens: {
       total: totalTokens,
       inputAll: totalInputAll,

@@ -26,6 +26,7 @@ export function buildInlineWidgetScript() {
       snapshot: null,
       prefs: { language: 'zh-CN', theme: 'swiss', showSpeed: true, showCache: true, showContext: true, showQuota: true, showToday: false, showMonth: true, version: 0 },
       confirmedPrefVersion: 0,
+      prefPendingCount: 0,
       popoverOpen: false,
       pinned: false,
       activeTab: 'speed',
@@ -146,6 +147,15 @@ export function buildInlineWidgetScript() {
         }
       }
       return null;
+    }
+
+    function fmtUsd(usd) {
+      var v = Number(usd);
+      if (!Number.isFinite(v) || v < 0) return null;
+      if (v === 0) return '$0.00';
+      if (v < 0.01) return '<$0.01';
+      if (v >= 1000) return '$' + (v / 1000).toFixed(2) + 'K';
+      return '$' + v.toFixed(2);
     }
 
     function getQuotaPairParts(pair, fallbackQuota) {
@@ -708,6 +718,10 @@ export function buildInlineWidgetScript() {
         var ttftFixed = fmtFixed(conv && conv.ttftSeconds, 2);
         var ttftText = ttftFixed !== null ? ttftFixed + 's' : '--';
         var sparkRes = buildSparklineSvg(conv && conv.sparkline);
+        var costStr = conv && conv.costUsd != null ? fmtUsd(conv.costUsd) : null;
+        var rateBadge = conv && conv.pricing
+          ? '<span style="font-family:var(--tm-mono);font-size:9.5px;color:var(--tm-accent);margin-left:5px;" title="' + escapeHtml(t('pricingPer1M')) + '">$' + conv.pricing.inputPer1M + '/$' + conv.pricing.cacheReadPer1M + '/$' + conv.pricing.outputPer1M + '</span>'
+          : '';
         return {
           title: t('cardSpeed'),
           badge: isRunning ? t('generating') : '',
@@ -715,8 +729,8 @@ export function buildInlineWidgetScript() {
           chartMeta: sparkRes.meta,
           body:
             '<div class="tm-hero">' +
-              '<div class="tm-hero-main"><span class="tm-hero-num">' + escapeHtml(heroNum) + '</span><span class="tm-hero-unit">' + escapeHtml(t('speedUnit')) + '</span></div>' +
-              '<div class="tm-hero-meta">' + escapeHtml(t('streamTime')) + ' <b>' + escapeHtml(streamText) + '</b></div>' +
+              '<div class="tm-hero-main"><span class="tm-hero-num">' + escapeHtml(heroNum) + '</span><span class="tm-hero-unit">' + escapeHtml(t('speedUnit')) + '</span>' + rateBadge + '</div>' +
+              '<div class="tm-hero-meta">' + escapeHtml(t('streamTime')) + ' <b>' + escapeHtml(streamText) + '</b>' + (costStr ? '<br/><b style="color:var(--tm-cost,#059669)">' + escapeHtml(costStr) + '</b>' : '') + '</div>' +
             '</div>' +
             '<div class="tm-spark-wrap">' + sparkRes.html + '<div class="tm-mini-tip" id="tm-spark-tip" aria-hidden="true"></div></div>' +
             '<div class="tm-sub-strip tm-sub-strip-tight">' +
@@ -823,14 +837,15 @@ export function buildInlineWidgetScript() {
             '<div class="tm-mbar-track"><div class="tm-mbar-fill" style="width:' + pct + '%"></div></div>' +
           '</div>';
         }).join('');
+        var todayUsd = u.todayCostUsd != null ? fmtUsd(u.todayCostUsd) : null;
         return {
           title: t('cardToday'),
-          badge: '',
+          badge: todayUsd || '',
           footCtx: u.todayDate || '',
           body:
             '<div class="tm-hero">' +
               '<div class="tm-hero-main"><span class="tm-hero-num">' + escapeHtml(fmtTokens(tTotal)) + '</span><span class="tm-hero-unit">tokens</span></div>' +
-              '<div class="tm-hero-meta"><b>' + safeInt(u.todayRequests).toLocaleString() + '</b> ' + escapeHtml(t('requests')) + '<br/>' + escapeHtml(t('todayShare')) + ' <b>' + escapeHtml(shareText) + '</b></div>' +
+              '<div class="tm-hero-meta"><b>' + safeInt(u.todayRequests).toLocaleString() + '</b> ' + escapeHtml(t('requests')) + (todayUsd ? ' · <b style="color:var(--tm-cost,#059669)">' + escapeHtml(todayUsd) + '</b>' : '') + '<br/>' + escapeHtml(t('todayShare')) + ' <b>' + escapeHtml(shareText) + '</b></div>' +
             '</div>' +
             '<div class="tm-sub-strip">' +
               '<div class="tm-sub-cell"><div class="tm-sub-k">' + escapeHtml(t('uncachedIn')) + '</div><div class="tm-sub-v">' + escapeHtml(fmtTokens(u.todayInput)) + '</div></div>' +
@@ -844,6 +859,8 @@ export function buildInlineWidgetScript() {
       if (tab === 'month') {
         var um = usage || {};
         var trendRes = buildDailyTrendSvg(um.days, um.todayDate);
+        var monthUsd = um.monthCostUsd != null ? fmtUsd(um.monthCostUsd) : null;
+        var totalUsd = um.totalCostUsd != null ? fmtUsd(um.totalCostUsd) : null;
         return {
           title: t('cardMonth'),
           badge: um.monthKey || '',
@@ -852,7 +869,7 @@ export function buildInlineWidgetScript() {
           body:
             '<div class="tm-hero">' +
               '<div class="tm-hero-main"><span class="tm-hero-num">' + escapeHtml(fmtTokens(um.monthTokens)) + '</span><span class="tm-hero-unit">tokens</span></div>' +
-              '<div class="tm-hero-meta"><b>' + safeInt(um.monthRequests).toLocaleString() + '</b> ' + escapeHtml(t('requests')) + '<br/>' + escapeHtml(t('lifetime')) + ' <b>' + escapeHtml(fmtTokens(um.totalTokens)) + '</b></div>' +
+              '<div class="tm-hero-meta"><b>' + safeInt(um.monthRequests).toLocaleString() + '</b> ' + escapeHtml(t('requests')) + (monthUsd ? ' · <b style="color:var(--tm-cost,#059669)">' + escapeHtml(monthUsd) + '</b>' : '') + '<br/>' + escapeHtml(t('lifetime')) + ' <b>' + escapeHtml(fmtTokens(um.totalTokens)) + '</b>' + (totalUsd ? ' · <b style="color:var(--tm-cost,#059669)">' + escapeHtml(totalUsd) + '</b>' : '') + '</div>' +
             '</div>' +
             '<div class="tm-sec-title" style="margin-bottom:4px;"><span>' + escapeHtml(t('dailyTrend')) + '</span><span class="tm-chart-readout" id="tm-trend-readout"></span></div>' +
             '<div class="tm-trend-wrap">' + trendRes.html + '<div class="tm-mini-tip" id="tm-trend-tip" aria-hidden="true"></div></div>' +
@@ -996,9 +1013,9 @@ export function buildInlineWidgetScript() {
           --tm-hairline: rgba(255,255,255,0.08);
           --tm-shadow: 0 24px 56px -12px rgba(0,0,0,0.62), inset 0 1px 0 rgba(255,255,255,0.12);
         }
-        /* 主题 3：极客终端 Mono（全等宽精密仪器 + 经典翠绿磷光点缀） */
+        /* 主题 3：极客终端 Mono（数字等宽精密仪器 + 经典翠绿磷光点缀，正文保留无衬线防中文退化宋体及排版跳动） */
         :host([data-style="mono"]) {
-          --tm-font: var(--tm-mono);
+          --tm-cost: #059669;
           --tm-card: #f6f8f6;
           --tm-elev: #e9eee9;
           --tm-border: rgba(16,32,24,0.18);
@@ -1013,6 +1030,7 @@ export function buildInlineWidgetScript() {
           --tm-shadow: 0 14px 32px -10px rgba(16,32,24,0.16);
         }
         :host([data-theme="dark"][data-style="mono"]) {
+          --tm-cost: #34d399;
           --tm-card: #0c100e;
           --tm-elev: #151d19;
           --tm-border: rgba(16,185,129,0.22);
@@ -1829,10 +1847,8 @@ export function buildInlineWidgetScript() {
           --tm-zc-4: #10b981;
         }
         .tm-backdrop { position: fixed; inset: 0; z-index: 2147483640; background: rgba(9,9,11,0.52); backdrop-filter: blur(6px); display: flex; align-items: center; justify-content: center; padding: 20px; }
-        .tm-modal { width: min(820px, 94vw); max-height: 88vh; overflow-y: auto; overflow-x: hidden; background: var(--tm-card); backdrop-filter: var(--tm-blur); -webkit-backdrop-filter: var(--tm-blur); border: 1px solid var(--tm-border); border-radius: 16px; box-shadow: var(--tm-shadow); padding: 24px 28px 22px; box-sizing: border-box; }
-        .tm-modal::-webkit-scrollbar { width: 6px; }
-        .tm-modal::-webkit-scrollbar-track { background: transparent; }
-        .tm-modal::-webkit-scrollbar-thumb { background: var(--tm-sep); border-radius: 99px; }
+        .tm-modal { width: min(820px, 94vw); max-height: 88vh; overflow-y: auto; overflow-x: hidden; scrollbar-width: none; -ms-overflow-style: none; background: var(--tm-card); backdrop-filter: var(--tm-blur); -webkit-backdrop-filter: var(--tm-blur); border: 1px solid var(--tm-border); border-radius: 16px; box-shadow: var(--tm-shadow); padding: 24px 28px 22px; box-sizing: border-box; transition: background-color .22s ease, border-color .22s ease, box-shadow .22s ease; }
+        .tm-modal::-webkit-scrollbar { display: none; width: 0; height: 0; }
 
         .tm-mhead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; gap: 10px; }
         .tm-mtitle-wrap { display: inline-flex; align-items: center; gap: 10px; }
@@ -2320,8 +2336,8 @@ export function buildInlineWidgetScript() {
               '</div>' +
             '</div>' +
             '<div class="tm-z-kpis">' +
-              '<div class="tm-z-kpi"><div class="tm-z-kpi-v">' + escapeHtml(fmtStatsTokens(usage.totalTokens)) + '</div><div class="tm-z-kpi-k">' + escapeHtml(t('kpiTotalTokens')) + '</div></div>' +
-              '<div class="tm-z-kpi"><div class="tm-z-kpi-v">' + escapeHtml(fmtStatsTokens(usage.monthTokens)) + '</div><div class="tm-z-kpi-k">' + escapeHtml(t('kpiMonthTokens')) + '</div></div>' +
+              '<div class="tm-z-kpi"><div class="tm-z-kpi-v">' + escapeHtml(fmtStatsTokens(usage.totalTokens)) + '</div><div class="tm-z-kpi-k">' + escapeHtml(t('kpiTotalTokens')) + (usage.totalCostUsd != null ? '<div style="font-size:10px;color:var(--tm-cost,#059669);font-family:var(--tm-mono);font-weight:600;margin-top:2px;">' + escapeHtml(fmtUsd(usage.totalCostUsd)) + '</div>' : '') + '</div></div>' +
+              '<div class="tm-z-kpi"><div class="tm-z-kpi-v">' + escapeHtml(fmtStatsTokens(usage.monthTokens)) + '</div><div class="tm-z-kpi-k">' + escapeHtml(t('kpiMonthTokens')) + (usage.monthCostUsd != null ? '<div style="font-size:10px;color:var(--tm-cost,#059669);font-family:var(--tm-mono);font-weight:600;margin-top:2px;">' + escapeHtml(fmtUsd(usage.monthCostUsd)) + '</div>' : '') + '</div></div>' +
               '<div class="tm-z-kpi" title="' + escapeHtml(peakDate) + '"><div class="tm-z-kpi-v">' + escapeHtml(fmtStatsTokens(peakVal)) + '</div><div class="tm-z-kpi-k">' + escapeHtml(t('kpiPeakTokens')) + '</div></div>' +
               '<div class="tm-z-kpi"><div class="tm-z-kpi-v">' + (state.prefs.language === 'en' ? (curStreak + t('daysUnit')) : (curStreak + ' ' + t('daysUnit'))) + '</div><div class="tm-z-kpi-k">' + escapeHtml(t('kpiCurrentStreak')) + '</div></div>' +
               '<div class="tm-z-kpi"><div class="tm-z-kpi-v">' + (state.prefs.language === 'en' ? (maxStreak + t('daysUnit')) : (maxStreak + ' ' + t('daysUnit'))) + '</div><div class="tm-z-kpi-k">' + escapeHtml(t('kpiLongestStreak')) + '</div></div>' +
@@ -2584,18 +2600,27 @@ export function buildInlineWidgetScript() {
     async function updatePrefs(patch) {
       state.pointerInPop = false;
       state.hoveringPopChart = false;
+      if (patch && typeof patch === 'object') {
+        state.prefs = Object.assign({}, state.prefs, patch);
+        ensureMounted();
+        renderBar();
+        if (state.modalOpen) renderModal(true);
+      }
+      state.prefPendingCount++;
       try {
         if (window.__agTokenMeterApi) {
           var next = await window.__agTokenMeterApi.setPrefs(patch);
           if (next && !next.error) {
             state.prefs = Object.assign({}, state.prefs, next);
             state.confirmedPrefVersion = Math.max(state.confirmedPrefVersion, safeInt(next.version));
+            ensureMounted();
+            renderBar();
+            if (state.modalOpen) renderModal(true);
           }
         }
-      } catch {}
-      ensureMounted();
-      renderBar();
-      if (state.modalOpen) renderModal(true);
+      } catch {} finally {
+        state.prefPendingCount = Math.max(0, state.prefPendingCount - 1);
+      }
     }
 
     function ensureMounted() {
@@ -2757,7 +2782,7 @@ export function buildInlineWidgetScript() {
         }
         if (snap) {
           state.snapshot = snap;
-          if (snap.preferences && safeInt(snap.preferences.version) >= state.confirmedPrefVersion) {
+          if (state.prefPendingCount === 0 && snap.preferences && safeInt(snap.preferences.version) >= state.confirmedPrefVersion) {
             state.prefs = Object.assign({}, state.prefs, snap.preferences);
             state.confirmedPrefVersion = safeInt(snap.preferences.version);
           }

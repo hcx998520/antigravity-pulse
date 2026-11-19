@@ -45,6 +45,14 @@
     if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K';
     return String(v);
   }
+  function fmtUsd(usd) {
+    const v = Number(usd);
+    if (!Number.isFinite(v) || v < 0) return null;
+    if (v === 0) return '$0.00';
+    if (v < 0.01) return '<$0.01';
+    if (v >= 1000) return '$' + (v / 1000).toFixed(2) + 'K';
+    return '$' + v.toFixed(2);
+  }
   function fmtPct(f) { return typeof f === 'number' && Number.isFinite(f) ? Math.round(Math.max(0, Math.min(1, f)) * 100) + '%' : '--'; }
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
   function fmtCountdown(iso) {
@@ -317,13 +325,16 @@
       const uMetaEl = document.getElementById('u-meta');
       if (uMetaEl) {
         const metaParts = [];
+        const totalCostStr = fmtUsd(usage.totalCostUsd);
+        if (totalCostStr) metaParts.push(totalCostStr);
         if (safeInt(usage.monthRequests) > 0) metaParts.push(`${safeInt(usage.monthRequests).toLocaleString()} ${t('requests')}`);
         if (safeInt(usage.activeDays) > 0) metaParts.push(`${safeInt(usage.activeDays)} ${t('activeDays')}`);
         uMetaEl.textContent = metaParts.join(' · ');
       }
       const heatEl = document.getElementById('heatmap');
       if (heatEl) heatEl.innerHTML = renderHeatmap(usage.days, usage.todayDate);
-      document.getElementById('today-sum').textContent = `${t('lifetime')} ${fmtTokens(usage.totalTokens)}`;
+      const savedStr = fmtUsd(usage.lifetimeCacheSavingsUsd);
+      document.getElementById('today-sum').textContent = `${t('lifetime')} ${fmtTokens(usage.totalTokens)}` + (savedStr ? ` · ${t('costSaved')} ${savedStr}` : '');
       const ranks = usage.modelRank || [];
       const tbody = document.getElementById('rank-body');
       tbody.textContent = '';
@@ -339,9 +350,30 @@
       } else {
         for (const m of ranks) {
           const tr = document.createElement('tr');
+          const tdModel = document.createElement('td');
+          const nameSpan = document.createElement('span');
+          nameSpan.textContent = String(m.model || '');
+          tdModel.appendChild(nameSpan);
+          if (m.pricing) {
+            const rateSpan = document.createElement('span');
+            rateSpan.className = 'rate-sub';
+            rateSpan.textContent = `$${m.pricing.inputPer1M}/$${m.pricing.cacheReadPer1M}/$${m.pricing.outputPer1M}`;
+            tdModel.appendChild(rateSpan);
+          }
+          tr.appendChild(tdModel);
+
+          const tdTot = document.createElement('td');
+          tdTot.textContent = fmtTokens(m.totalTokens);
+          const mCostStr = fmtUsd(m.costUsd);
+          if (mCostStr) {
+            const cSpan = document.createElement('span');
+            cSpan.className = 'cost-sub';
+            cSpan.textContent = mCostStr;
+            tdTot.appendChild(cSpan);
+          }
+          tr.appendChild(tdTot);
+
           for (const cellText of [
-            String(m.model || ''),
-            fmtTokens(m.totalTokens),
             fmtFixed(m.avgTps, 1) || '--',
             String(safeInt(m.requests)),
           ]) {
