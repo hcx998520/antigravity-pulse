@@ -223,7 +223,7 @@ function createDomEnv(snapshot) {
 
 test('buildInlineWidgetScript 一格一卡按需聚焦弹窗且悬停切换互不串栏', async (t) => {
   const snapshot = {
-    version: '1.2.11',
+    version: '1.2.12',
     connected: true,
     preferences: {
       language: 'zh-CN',
@@ -234,6 +234,7 @@ test('buildInlineWidgetScript 一格一卡按需聚焦弹窗且悬停切换互�
       showQuota: true,
       showToday: true,
       showMonth: true,
+      showCost: false,
       version: 1,
     },
     conversation: {
@@ -247,6 +248,8 @@ test('buildInlineWidgetScript 一格一卡按需聚焦弹窗且悬停切换互�
       requests: 30,
       cacheHitRate: 0.87,
       thinkingRatio: 0.21,
+      costUsd: 12.34,
+      pricing: { inputPer1M: 3, cacheReadPer1M: 0.15, outputPer1M: 15 },
       lastRequestTime: new Date().toISOString(),
       tokens: { total: 58000000, inputAll: 57360000, uncachedInput: 7350000, cacheRead: 50010000, output: 627900, responseOutput: 498600, thinkingOutput: 129300 },
       context: { usedTokens: 167900, maxTokens: 512000, remainingTokens: 344100, usedFraction: 0.328, estimatedTurnsLeft: 9 },
@@ -317,12 +320,12 @@ test('buildInlineWidgetScript 一格一卡按需聚焦弹窗且悬停切换互�
   const pop = shadow.getElementById('tm-popover');
 
   const expectByChip = {
-    speed: { must: ['生成速率', '134.4', '会话均速', 'tm-spark-svg', 'tm-sp-node', 'tm-spark-tip'], forbid: ['模型额度', '今日模型分布', '近 14 天趋势'] },
+    speed: { must: ['生成速率', '134.4', '会话均速', 'tm-spark-svg', 'tm-sp-node', 'tm-spark-tip'], forbid: ['模型额度', '今日模型分布', '近 14 天趋势', '~$12.34'] },
     cache: { must: ['缓存效率', '87%', '未缓存输入'], forbid: ['会话均速', '模型额度', '近 14 天趋势'] },
     context: { must: ['上下文窗口', '33%', '约余 9 轮', 'linear-gradient'], forbid: ['会话均速', '模型额度', '今日模型分布'] },
     quota: { must: ['模型额度', 'Gemini Models', '82%', '92%', '竖线为时间基准'], forbid: ['会话均速', '上下文空间充裕', '近 14 天趋势'] },
-    today: { must: ['今日消耗', '288.80M', '今日模型分布'], forbid: ['模型额度', '近 14 天趋势', '会话均速'] },
-    month: { must: ['本月消耗', '2.68B', '近 14 天趋势', 'tm-trend-svg', 'tm-trend-hit', 'tm-trend-tip', 'tm-trend-readout'], forbid: ['模型额度', '今日模型分布', '会话均速', '<title>2026-'] },
+    today: { must: ['今日消耗', '288.80M', '今日模型分布'], forbid: ['模型额度', '近 14 天趋势', '会话均速', '~$'] },
+    month: { must: ['本月消耗', '2.68B', '近 14 天趋势', 'tm-trend-svg', 'tm-trend-hit', 'tm-trend-tip', 'tm-trend-readout'], forbid: ['模型额度', '今日模型分布', '会话均速', '<title>2026-', '~$'] },
   };
 
   for (const [chipKey, rule] of Object.entries(expectByChip)) {
@@ -385,7 +388,7 @@ test('buildInlineWidgetScript 一格一卡按需聚焦弹窗且悬停切换互�
 
 test('英文模式浮卡排版防溢出：进度条短标 5h/7d 无重叠、无多余空格且底栏宽窄自适应', async (t) => {
   const snapshot = {
-    version: '1.2.11',
+    version: '1.2.12',
     connected: true,
     preferences: {
       language: 'en',
@@ -487,7 +490,7 @@ test('英文模式浮卡排版防溢出：进度条短标 5h/7d 无重叠、无�
 test('新对话首页无 conversationId 时照常拉取全局额度与本月用量，绝不变灰或空白', async (t) => {
   let calledWith = 'UNSET';
   const snapshot = {
-    version: '1.2.11',
+    version: '1.2.12',
     connected: true,
     conversationUnavailable: true,
     conversation: null,

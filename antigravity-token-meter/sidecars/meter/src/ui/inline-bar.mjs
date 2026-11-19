@@ -24,7 +24,7 @@ export function buildInlineWidgetScript() {
     var state = {
       disposed: false,
       snapshot: null,
-      prefs: { language: 'zh-CN', theme: 'swiss', showSpeed: true, showCache: true, showContext: true, showQuota: true, showToday: false, showMonth: true, version: 0 },
+      prefs: { language: 'zh-CN', theme: 'swiss', showSpeed: true, showCache: true, showContext: true, showQuota: true, showToday: false, showMonth: true, showCost: false, version: 0 },
       confirmedPrefVersion: 0,
       prefPendingCount: 0,
       popoverOpen: false,
@@ -151,11 +151,10 @@ export function buildInlineWidgetScript() {
 
     function fmtUsd(usd) {
       var v = Number(usd);
-      if (!Number.isFinite(v) || v < 0) return null;
-      if (v === 0) return '$0.00';
+      if (!Number.isFinite(v) || v <= 0) return null;
       if (v < 0.01) return '<$0.01';
-      if (v >= 1000) return '$' + (v / 1000).toFixed(2) + 'K';
-      return '$' + v.toFixed(2);
+      if (v >= 1000) return '~$' + (v / 1000).toFixed(2) + 'K';
+      return '~$' + v.toFixed(2);
     }
 
     function getQuotaPairParts(pair, fallbackQuota) {
@@ -718,10 +717,11 @@ export function buildInlineWidgetScript() {
         var ttftFixed = fmtFixed(conv && conv.ttftSeconds, 2);
         var ttftText = ttftFixed !== null ? ttftFixed + 's' : '--';
         var sparkRes = buildSparklineSvg(conv && conv.sparkline);
-        var costStr = conv && conv.costUsd != null ? fmtUsd(conv.costUsd) : null;
-        var rateBadge = conv && conv.pricing
-          ? '<span style="font-family:var(--tm-mono);font-size:9.5px;color:var(--tm-accent);margin-left:5px;" title="' + escapeHtml(t('pricingPer1M')) + '">$' + conv.pricing.inputPer1M + '/$' + conv.pricing.cacheReadPer1M + '/$' + conv.pricing.outputPer1M + '</span>'
-          : '';
+        var showCost = Boolean(state.prefs && state.prefs.showCost === true);
+        var costStr = showCost && conv && conv.costUsd > 0 ? fmtUsd(conv.costUsd) : null;
+        var rateTip = conv && conv.pricing
+          ? (t('costLabel') + ' · $' + conv.pricing.inputPer1M + '/$' + conv.pricing.cacheReadPer1M + '/$' + conv.pricing.outputPer1M + ' ' + t('rateUnit'))
+          : t('costLabel');
         return {
           title: t('cardSpeed'),
           badge: isRunning ? t('generating') : '',
@@ -729,8 +729,8 @@ export function buildInlineWidgetScript() {
           chartMeta: sparkRes.meta,
           body:
             '<div class="tm-hero">' +
-              '<div class="tm-hero-main"><span class="tm-hero-num">' + escapeHtml(heroNum) + '</span><span class="tm-hero-unit">' + escapeHtml(t('speedUnit')) + '</span>' + rateBadge + '</div>' +
-              '<div class="tm-hero-meta">' + escapeHtml(t('streamTime')) + ' <b>' + escapeHtml(streamText) + '</b>' + (costStr ? '<br/><b style="color:var(--tm-cost,#059669)">' + escapeHtml(costStr) + '</b>' : '') + '</div>' +
+              '<div class="tm-hero-main"><span class="tm-hero-num">' + escapeHtml(heroNum) + '</span><span class="tm-hero-unit">' + escapeHtml(t('speedUnit')) + '</span></div>' +
+              '<div class="tm-hero-meta">' + escapeHtml(t('streamTime')) + ' <b>' + escapeHtml(streamText) + '</b>' + (costStr ? '<br/><b class="tm-cost-val" title="' + escapeHtml(rateTip) + '">' + escapeHtml(costStr) + '</b>' : '') + '</div>' +
             '</div>' +
             '<div class="tm-spark-wrap">' + sparkRes.html + '<div class="tm-mini-tip" id="tm-spark-tip" aria-hidden="true"></div></div>' +
             '<div class="tm-sub-strip tm-sub-strip-tight">' +
@@ -837,7 +837,8 @@ export function buildInlineWidgetScript() {
             '<div class="tm-mbar-track"><div class="tm-mbar-fill" style="width:' + pct + '%"></div></div>' +
           '</div>';
         }).join('');
-        var todayUsd = u.todayCostUsd != null ? fmtUsd(u.todayCostUsd) : null;
+        var showCostToday = Boolean(state.prefs && state.prefs.showCost === true);
+        var todayUsd = showCostToday && u.todayCostUsd > 0 ? fmtUsd(u.todayCostUsd) : null;
         return {
           title: t('cardToday'),
           badge: todayUsd || '',
@@ -845,7 +846,7 @@ export function buildInlineWidgetScript() {
           body:
             '<div class="tm-hero">' +
               '<div class="tm-hero-main"><span class="tm-hero-num">' + escapeHtml(fmtTokens(tTotal)) + '</span><span class="tm-hero-unit">tokens</span></div>' +
-              '<div class="tm-hero-meta"><b>' + safeInt(u.todayRequests).toLocaleString() + '</b> ' + escapeHtml(t('requests')) + (todayUsd ? ' · <b style="color:var(--tm-cost,#059669)">' + escapeHtml(todayUsd) + '</b>' : '') + '<br/>' + escapeHtml(t('todayShare')) + ' <b>' + escapeHtml(shareText) + '</b></div>' +
+              '<div class="tm-hero-meta"><b>' + safeInt(u.todayRequests).toLocaleString() + '</b> ' + escapeHtml(t('requests')) + '<br/>' + escapeHtml(t('todayShare')) + ' <b>' + escapeHtml(shareText) + '</b></div>' +
             '</div>' +
             '<div class="tm-sub-strip">' +
               '<div class="tm-sub-cell"><div class="tm-sub-k">' + escapeHtml(t('uncachedIn')) + '</div><div class="tm-sub-v">' + escapeHtml(fmtTokens(u.todayInput)) + '</div></div>' +
@@ -859,17 +860,18 @@ export function buildInlineWidgetScript() {
       if (tab === 'month') {
         var um = usage || {};
         var trendRes = buildDailyTrendSvg(um.days, um.todayDate);
-        var monthUsd = um.monthCostUsd != null ? fmtUsd(um.monthCostUsd) : null;
-        var totalUsd = um.totalCostUsd != null ? fmtUsd(um.totalCostUsd) : null;
+        var showCostMonth = Boolean(state.prefs && state.prefs.showCost === true);
+        var monthUsd = showCostMonth && um.monthCostUsd > 0 ? fmtUsd(um.monthCostUsd) : null;
+        var totalUsd = showCostMonth && um.totalCostUsd > 0 ? fmtUsd(um.totalCostUsd) : null;
         return {
           title: t('cardMonth'),
           badge: um.monthKey || '',
-          footCtx: (safeInt(um.activeDays) > 0 ? (safeInt(um.activeDays) + ' ' + t('activeDays')) : ''),
+          footCtx: (safeInt(um.activeDays) > 0 ? (safeInt(um.activeDays) + ' ' + t('activeDays')) : '') + (totalUsd ? (' · ' + t('lifetime') + ' ' + totalUsd) : ''),
           chartMeta: trendRes.meta,
           body:
             '<div class="tm-hero">' +
               '<div class="tm-hero-main"><span class="tm-hero-num">' + escapeHtml(fmtTokens(um.monthTokens)) + '</span><span class="tm-hero-unit">tokens</span></div>' +
-              '<div class="tm-hero-meta"><b>' + safeInt(um.monthRequests).toLocaleString() + '</b> ' + escapeHtml(t('requests')) + (monthUsd ? ' · <b style="color:var(--tm-cost,#059669)">' + escapeHtml(monthUsd) + '</b>' : '') + '<br/>' + escapeHtml(t('lifetime')) + ' <b>' + escapeHtml(fmtTokens(um.totalTokens)) + '</b>' + (totalUsd ? ' · <b style="color:var(--tm-cost,#059669)">' + escapeHtml(totalUsd) + '</b>' : '') + '</div>' +
+              '<div class="tm-hero-meta"><b>' + safeInt(um.monthRequests).toLocaleString() + '</b> ' + escapeHtml(t('requests')) + '<br/>' + (monthUsd ? ('<b class="tm-cost-val" title="' + escapeHtml(t('costLabel')) + '">' + escapeHtml(monthUsd) + '</b>') : (escapeHtml(t('lifetime')) + ' <b>' + escapeHtml(fmtTokens(um.totalTokens)) + '</b>')) + '</div>' +
             '</div>' +
             '<div class="tm-sec-title" style="margin-bottom:4px;"><span>' + escapeHtml(t('dailyTrend')) + '</span><span class="tm-chart-readout" id="tm-trend-readout"></span></div>' +
             '<div class="tm-trend-wrap">' + trendRes.html + '<div class="tm-mini-tip" id="tm-trend-tip" aria-hidden="true"></div></div>' +
@@ -954,6 +956,7 @@ export function buildInlineWidgetScript() {
           --tm-sep: rgba(24,24,27,0.16);
           --tm-ring-track: rgba(24,24,27,0.13);
           --tm-accent: #2563eb;
+          --tm-cost: #059669;
           --tm-gem-a: #38bdf8;
           --tm-gem-b: #3b82f6;
           --tm-gem-c: #7c3aed;
@@ -986,6 +989,7 @@ export function buildInlineWidgetScript() {
           --tm-sep: rgba(255,255,255,0.16);
           --tm-ring-track: rgba(255,255,255,0.15);
           --tm-accent: #60a5fa;
+          --tm-cost: #34d399;
           --tm-gem-a: #67e8f9;
           --tm-gem-b: #60a5fa;
           --tm-gem-c: #a78bfa;
@@ -1139,6 +1143,7 @@ export function buildInlineWidgetScript() {
         .tm-hero-unit { font-size: 11px; color: var(--tm-muted); font-weight: 500; }
         .tm-hero-meta { font-size: 10.5px; color: var(--tm-muted); text-align: right; font-variant-numeric: tabular-nums; line-height: 1.45; }
         .tm-hero-meta b { color: var(--tm-text); font-weight: 600; }
+        .tm-cost-val { color: var(--tm-cost) !important; font-family: var(--tm-mono); }
         .tm-spark-wrap, .tm-trend-wrap { position: relative; color: var(--tm-text); margin: 2px 0 9px; }
         .tm-spark, .tm-trend { display: block; overflow: visible; }
         .tm-chart-interactive { cursor: pointer; }
@@ -1855,7 +1860,7 @@ export function buildInlineWidgetScript() {
         .tm-mtitle { font-size: 20px; font-weight: 700; letter-spacing: -0.025em; color: var(--tm-text); line-height: 1.2; }
         .tm-mbadge { font-size: 11px; font-weight: 500; color: var(--tm-muted); background: var(--tm-z-surface); padding: 3px 10px; border-radius: 99px; }
 
-        .tm-z-kpis { display: grid; grid-template-columns: repeat(5, 1fr); background: var(--tm-z-surface); border-radius: 14px; padding: 15px 6px; margin-bottom: 14px; }
+        .tm-z-kpis { display: grid; grid-template-columns: repeat(5, 1fr); align-items: center; background: var(--tm-z-surface); border-radius: 14px; padding: 15px 6px; margin-bottom: 14px; }
         @media (max-width: 580px) {
           .tm-z-kpis { grid-template-columns: repeat(2, 1fr); gap: 10px 4px; }
           .tm-z-kpi { border-left: none; }
@@ -2309,6 +2314,7 @@ export function buildInlineWidgetScript() {
         ['showQuota', t('optQuota')],
         ['showToday', t('optToday')],
         ['showMonth', t('optMonth')],
+        ['showCost', t('optCost')],
       ].map(function(pair) {
         var on = Boolean(state.prefs[pair[0]]);
         return '<label class="tm-pill ' + (on ? 'on' : '') + '"><input type="checkbox" data-pref-key="' + escapeHtml(pair[0]) + '"' + (on ? ' checked' : '') + '/><span class="tm-pill-dot"></span>' + escapeHtml(pair[1]) + '</label>';
@@ -2323,6 +2329,10 @@ export function buildInlineWidgetScript() {
         return '<button class="tm-z-seg-btn' + active + '" type="button" data-theme-pick="' + pair[0] + '">' + escapeHtml(pair[1]) + '</button>';
       }).join('');
 
+      var showModalCost = Boolean(state.prefs && state.prefs.showCost === true);
+      var modalTotalCost = showModalCost && usage.totalCostUsd > 0 ? fmtUsd(usage.totalCostUsd) : null;
+      var modalMonthCost = showModalCost && usage.monthCostUsd > 0 ? fmtUsd(usage.monthCostUsd) : null;
+
       var nextModalHtml =
         '<style>' + modalStyles() + '</style>' +
         '<div class="tm-backdrop" id="tm-backdrop" role="dialog" aria-modal="true">' +
@@ -2336,8 +2346,8 @@ export function buildInlineWidgetScript() {
               '</div>' +
             '</div>' +
             '<div class="tm-z-kpis">' +
-              '<div class="tm-z-kpi"><div class="tm-z-kpi-v">' + escapeHtml(fmtStatsTokens(usage.totalTokens)) + '</div><div class="tm-z-kpi-k">' + escapeHtml(t('kpiTotalTokens')) + (usage.totalCostUsd != null ? '<div style="font-size:10px;color:var(--tm-cost,#059669);font-family:var(--tm-mono);font-weight:600;margin-top:2px;">' + escapeHtml(fmtUsd(usage.totalCostUsd)) + '</div>' : '') + '</div></div>' +
-              '<div class="tm-z-kpi"><div class="tm-z-kpi-v">' + escapeHtml(fmtStatsTokens(usage.monthTokens)) + '</div><div class="tm-z-kpi-k">' + escapeHtml(t('kpiMonthTokens')) + (usage.monthCostUsd != null ? '<div style="font-size:10px;color:var(--tm-cost,#059669);font-family:var(--tm-mono);font-weight:600;margin-top:2px;">' + escapeHtml(fmtUsd(usage.monthCostUsd)) + '</div>' : '') + '</div></div>' +
+              '<div class="tm-z-kpi"><div class="tm-z-kpi-v">' + escapeHtml(fmtStatsTokens(usage.totalTokens)) + '</div><div class="tm-z-kpi-k">' + escapeHtml(t('kpiTotalTokens')) + (modalTotalCost ? '<div style="font-size:10px;color:var(--tm-cost);font-family:var(--tm-mono);font-weight:600;margin-top:2px;">' + escapeHtml(modalTotalCost) + '</div>' : '') + '</div></div>' +
+              '<div class="tm-z-kpi"><div class="tm-z-kpi-v">' + escapeHtml(fmtStatsTokens(usage.monthTokens)) + '</div><div class="tm-z-kpi-k">' + escapeHtml(t('kpiMonthTokens')) + (modalMonthCost ? '<div style="font-size:10px;color:var(--tm-cost);font-family:var(--tm-mono);font-weight:600;margin-top:2px;">' + escapeHtml(modalMonthCost) + '</div>' : '') + '</div></div>' +
               '<div class="tm-z-kpi" title="' + escapeHtml(peakDate) + '"><div class="tm-z-kpi-v">' + escapeHtml(fmtStatsTokens(peakVal)) + '</div><div class="tm-z-kpi-k">' + escapeHtml(t('kpiPeakTokens')) + '</div></div>' +
               '<div class="tm-z-kpi"><div class="tm-z-kpi-v">' + (state.prefs.language === 'en' ? (curStreak + t('daysUnit')) : (curStreak + ' ' + t('daysUnit'))) + '</div><div class="tm-z-kpi-k">' + escapeHtml(t('kpiCurrentStreak')) + '</div></div>' +
               '<div class="tm-z-kpi"><div class="tm-z-kpi-v">' + (state.prefs.language === 'en' ? (maxStreak + t('daysUnit')) : (maxStreak + ' ' + t('daysUnit'))) + '</div><div class="tm-z-kpi-k">' + escapeHtml(t('kpiLongestStreak')) + '</div></div>' +
@@ -2600,6 +2610,7 @@ export function buildInlineWidgetScript() {
     async function updatePrefs(patch) {
       state.pointerInPop = false;
       state.hoveringPopChart = false;
+      var prevPrefs = Object.assign({}, state.prefs);
       if (patch && typeof patch === 'object') {
         state.prefs = Object.assign({}, state.prefs, patch);
         ensureMounted();
@@ -2607,10 +2618,12 @@ export function buildInlineWidgetScript() {
         if (state.modalOpen) renderModal(true);
       }
       state.prefPendingCount++;
+      var committed = false;
       try {
         if (window.__agTokenMeterApi) {
           var next = await window.__agTokenMeterApi.setPrefs(patch);
           if (next && !next.error) {
+            committed = true;
             state.prefs = Object.assign({}, state.prefs, next);
             state.confirmedPrefVersion = Math.max(state.confirmedPrefVersion, safeInt(next.version));
             ensureMounted();
@@ -2620,6 +2633,13 @@ export function buildInlineWidgetScript() {
         }
       } catch {} finally {
         state.prefPendingCount = Math.max(0, state.prefPendingCount - 1);
+        // 若持久化失败且无其他在途修改，安全回滚乐观状态，防止假切换误导用户
+        if (!committed && state.prefPendingCount === 0 && !state.disposed) {
+          state.prefs = prevPrefs;
+          ensureMounted();
+          renderBar();
+          if (state.modalOpen) renderModal(true);
+        }
       }
     }
 

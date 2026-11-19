@@ -77,7 +77,7 @@ function parseTimestampMs(raw) {
 
 function printHelp() {
   console.log([
-    'Antigravity TokenMeter 历史用量迁移工具 (v1.2.11)',
+    'Antigravity TokenMeter 历史用量迁移工具 (v1.2.12)',
     '',
     '用法:',
     '  node scripts/import_legacy_usage.mjs [选项]',
@@ -325,7 +325,7 @@ async function main() {
     writeFileSync(tmpPending, JSON.stringify(scan.bundle), { encoding: 'utf8', mode: 0o600 });
     renameSync(tmpPending, pendingPath);
     console.log('[TokenMeter] 检测到 Antigravity sidecar 正在运行，已安全写入 pending-import.json 保护队列（未并发修改运行中的账本）。');
-    console.log('[TokenMeter] 重启 Antigravity 加载 v1.2.11 后将自动原子吸纳并归档。');
+    console.log('[TokenMeter] 重启 Antigravity 加载 v1.2.12 后将自动原子吸纳并归档。');
     return;
   }
 

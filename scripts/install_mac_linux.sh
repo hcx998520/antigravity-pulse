@@ -166,6 +166,7 @@ if [[ ! -f "$CFG_DIR/preferences.json" ]]; then
   "showQuota": true,
   "showToday": false,
   "showMonth": true,
+  "showCost": false,
   "version": 1
 }
 EOF
@@ -202,5 +203,5 @@ EOF
 fi
 
 echo ""
-echo "[完成] Antigravity TokenMeter v1.2.11 已安装至: $DST_PLUGIN"
+echo "[完成] Antigravity TokenMeter v1.2.12 已安装至: $DST_PLUGIN"
 echo "已在 config.json 中同时启用插件与 sidecar。"

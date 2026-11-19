@@ -13,7 +13,7 @@
   const DICT = window.__AG_TM_I18N__ || { 'zh-CN': { diag: {} }, en: { diag: {} } };
   const THEMES = ['swiss', 'glass', 'mono'];
   let lang = 'zh-CN';
-  let prefs = { language: 'zh-CN', theme: 'swiss', showSpeed: true, showCache: true, showContext: true, showQuota: true, showToday: false, showMonth: true, version: 0 };
+  let prefs = { language: 'zh-CN', theme: 'swiss', showSpeed: true, showCache: true, showContext: true, showQuota: true, showToday: false, showMonth: true, showCost: false, version: 0 };
   let confirmedVersion = 0;
   let reqSeq = 0;
 
@@ -47,11 +47,10 @@
   }
   function fmtUsd(usd) {
     const v = Number(usd);
-    if (!Number.isFinite(v) || v < 0) return null;
-    if (v === 0) return '$0.00';
+    if (!Number.isFinite(v) || v <= 0) return null;
     if (v < 0.01) return '<$0.01';
-    if (v >= 1000) return '$' + (v / 1000).toFixed(2) + 'K';
-    return '$' + v.toFixed(2);
+    if (v >= 1000) return '~$' + (v / 1000).toFixed(2) + 'K';
+    return '~$' + v.toFixed(2);
   }
   function fmtPct(f) { return typeof f === 'number' && Number.isFinite(f) ? Math.round(Math.max(0, Math.min(1, f)) * 100) + '%' : '--'; }
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
@@ -163,6 +162,7 @@
       ['showSpeed', t('optSpeed')], ['showCache', t('optCache')],
       ['showContext', t('optContext')], ['showQuota', t('optQuota')],
       ['showToday', t('optToday')], ['showMonth', t('optMonth')],
+      ['showCost', t('optCost')],
     ];
     const box = document.getElementById('toggles');
     box.innerHTML = items.map(([k, label]) => {
@@ -177,6 +177,7 @@
             prefs = next;
             confirmedVersion = Math.max(confirmedVersion, safeInt(next.version));
             renderToggles();
+            if (inp.dataset.k === 'showCost') void refresh();
           }
         } catch {
           inp.checked = !inp.checked;
@@ -322,10 +323,11 @@
       document.getElementById('u-week').textContent = fmtTokens(usage.weekTokens);
       document.getElementById('u-month').textContent = fmtTokens(usage.monthTokens);
       document.getElementById('u-total').textContent = fmtTokens(usage.totalTokens);
+      const showCost = prefs.showCost === true;
       const uMetaEl = document.getElementById('u-meta');
       if (uMetaEl) {
         const metaParts = [];
-        const totalCostStr = fmtUsd(usage.totalCostUsd);
+        const totalCostStr = showCost ? fmtUsd(usage.totalCostUsd) : null;
         if (totalCostStr) metaParts.push(totalCostStr);
         if (safeInt(usage.monthRequests) > 0) metaParts.push(`${safeInt(usage.monthRequests).toLocaleString()} ${t('requests')}`);
         if (safeInt(usage.activeDays) > 0) metaParts.push(`${safeInt(usage.activeDays)} ${t('activeDays')}`);
@@ -333,7 +335,7 @@
       }
       const heatEl = document.getElementById('heatmap');
       if (heatEl) heatEl.innerHTML = renderHeatmap(usage.days, usage.todayDate);
-      const savedStr = fmtUsd(usage.lifetimeCacheSavingsUsd);
+      const savedStr = showCost ? fmtUsd(usage.lifetimeCacheSavingsUsd) : null;
       document.getElementById('today-sum').textContent = `${t('lifetime')} ${fmtTokens(usage.totalTokens)}` + (savedStr ? ` · ${t('costSaved')} ${savedStr}` : '');
       const ranks = usage.modelRank || [];
       const tbody = document.getElementById('rank-body');
@@ -354,7 +356,7 @@
           const nameSpan = document.createElement('span');
           nameSpan.textContent = String(m.model || '');
           tdModel.appendChild(nameSpan);
-          if (m.pricing) {
+          if (showCost && m.pricing) {
             const rateSpan = document.createElement('span');
             rateSpan.className = 'rate-sub';
             rateSpan.textContent = `$${m.pricing.inputPer1M}/$${m.pricing.cacheReadPer1M}/$${m.pricing.outputPer1M}`;
@@ -364,7 +366,7 @@
 
           const tdTot = document.createElement('td');
           tdTot.textContent = fmtTokens(m.totalTokens);
-          const mCostStr = fmtUsd(m.costUsd);
+          const mCostStr = showCost ? fmtUsd(m.costUsd) : null;
           if (mCostStr) {
             const cSpan = document.createElement('span');
             cSpan.className = 'cost-sub';

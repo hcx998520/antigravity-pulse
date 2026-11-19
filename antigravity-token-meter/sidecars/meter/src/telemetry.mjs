@@ -7,7 +7,7 @@
  * - 账本去重键采用局部 SHA-256 不可逆哈希，不落盘原始会话 ID 或消息 ID。
  */
 import { createHash } from 'node:crypto';
-import { computeTokenCost } from './pricing.mjs';
+import { computeTokenCost, getModelPricing } from './pricing.mjs';
 
 const MAX_METADATA_ITEMS = 5000;
 const INT_STR_RE = /^\d{1,15}$/;
@@ -529,6 +529,8 @@ export function computeConversationTelemetry({
   let latestModel = null;
   let lastRequestMs = 0;
   let lastRequestTime = null;
+  let totalCostUsd = 0;
+  let totalCacheSavingsUsd = 0;
   const sparkline = [];
   const ledgerEvents = [];
 
@@ -544,6 +546,16 @@ export function computeConversationTelemetry({
     if (Number.isFinite(itemMs) && itemMs >= lastRequestMs) {
       lastRequestMs = itemMs;
       lastRequestTime = item.timestamp;
+    }
+    const stepCost = computeTokenCost({
+      model: item.model,
+      inputTokens: item.inputTokens + item.cacheWriteTokens,
+      cacheReadTokens: item.cacheReadTokens,
+      outputTokens: item.outputTokens,
+    }, Number.isFinite(itemMs) ? itemMs : Date.now());
+    if (stepCost) {
+      totalCostUsd += stepCost.costUsd;
+      totalCacheSavingsUsd += stepCost.cacheSavingsUsd;
     }
 
     let reliableTps = null;
@@ -604,12 +616,7 @@ export function computeConversationTelemetry({
   }
 
   const resolvedModel = latestModel || latestSample?.model || null;
-  const costInfo = computeTokenCost({
-    model: resolvedModel,
-    inputTokens: totalUncachedInput + totalCacheWrite,
-    cacheReadTokens: totalCacheRead,
-    outputTokens: totalOutput,
-  });
+  const resolvedPricing = resolvedModel ? getModelPricing(resolvedModel) : null;
 
   return {
     cascadeId,
@@ -626,9 +633,9 @@ export function computeConversationTelemetry({
     streamingSeconds: Number(weightedStreamingSec.toFixed(2)),
     cacheHitRate: cacheHitRate !== null ? Number(cacheHitRate.toFixed(4)) : null,
     thinkingRatio,
-    costUsd: costInfo ? costInfo.costUsd : null,
-    cacheSavingsUsd: costInfo ? costInfo.cacheSavingsUsd : null,
-    pricing: costInfo ? costInfo.pricing : null,
+    costUsd: ledgerEvents.length > 0 ? Number(totalCostUsd.toFixed(6)) : null,
+    cacheSavingsUsd: ledgerEvents.length > 0 ? Number(totalCacheSavingsUsd.toFixed(6)) : null,
+    pricing: resolvedPricing,
     tokens: {
       total: totalTokens,
       inputAll: totalInputAll,

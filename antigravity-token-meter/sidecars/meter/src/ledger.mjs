@@ -723,6 +723,8 @@ export class UsageLedger {
         requests: reqs,
       };
       let dayCostUsd = 0;
+      const dayTsMs = Date.parse(`${key}T12:00:00Z`);
+      const rateTsMs = Number.isFinite(dayTsMs) ? dayTsMs : now.getTime();
       if (entry?.byModel && typeof entry.byModel === 'object') {
         const bm = {};
         const bmc = {};
@@ -739,7 +741,7 @@ export class UsageLedger {
               inputTokens: r ? v * r.inFrac : v * 0.04,
               cacheReadTokens: r ? v * r.cacheFrac : v * 0.93,
               outputTokens: r ? v * r.outFrac : v * 0.03,
-            }, now.getTime());
+            }, rateTsMs);
             if (c) {
               dayCostUsd += c.costUsd;
               bmc[name] = Number(c.costUsd.toFixed(4));
@@ -748,7 +750,7 @@ export class UsageLedger {
         }
         if (t > attributed) {
           const rem = t - attributed;
-          const remC = computeTokenCost({ model: 'Gemini 3.8 Flash', inputTokens: rem * 0.04, cacheReadTokens: rem * 0.93, outputTokens: rem * 0.03 }, now.getTime());
+          const remC = computeTokenCost({ model: 'Gemini 3.8 Flash', inputTokens: rem * 0.04, cacheReadTokens: rem * 0.93, outputTokens: rem * 0.03 }, rateTsMs);
           if (remC) dayCostUsd += remC.costUsd;
         }
         if (idx >= recentCutoffIndex) {
@@ -756,7 +758,7 @@ export class UsageLedger {
           dayItem.byModelCost = bmc;
         }
       } else if (t > 0) {
-        const estC = computeTokenCost({ model: 'Gemini 3.8 Flash', inputTokens: t * 0.04, cacheReadTokens: t * 0.93, outputTokens: t * 0.03 }, now.getTime());
+        const estC = computeTokenCost({ model: 'Gemini 3.8 Flash', inputTokens: t * 0.04, cacheReadTokens: t * 0.93, outputTokens: t * 0.03 }, rateTsMs);
         if (estC) dayCostUsd = estC.costUsd;
       }
       dayCostUsd = Number(dayCostUsd.toFixed(4));
@@ -796,7 +798,7 @@ export class UsageLedger {
 
     const modelRank = Object.entries(this.state.models)
       .map(([name, m]) => {
-        const pricing = getModelPricing(name, now);
+        const pricing = getModelPricing(name, now.getTime());
         const mr = modelRatio[name];
         return {
           model: String(name),
