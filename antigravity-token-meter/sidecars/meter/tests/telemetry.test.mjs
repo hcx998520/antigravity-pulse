@@ -200,3 +200,37 @@ test('selectQuotaPair 支持按模型家族匹配官方分组且不跨组借用�
   assert.equal(fullCtx.context.estimatedTurnsLeft, 0);
   assert.equal(fullCtx.thinkingRatio, 1);
 });
+
+test('Protobuf3 省略 0% remainingFraction 或刚重置缺 resetTime 的周额度桶绝不丢失', () => {
+  const now = Date.parse('2026-11-20T02:00:00Z');
+  const groups = projectQuotaSummary({
+    response: {
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          buckets: [
+            { displayName: '5h', window: '5h', remainingFraction: 0.89, resetTime: '2026-11-20T06:00:00Z' },
+            // 周额度耗尽至 0% 时 Protobuf3 JSON 省略 remainingFraction，仅保留 resetTime
+            { displayName: 'Weekly Limit', resetTime: '2026-11-26T00:00:00Z' },
+          ],
+        },
+        {
+          displayName: 'Claude and GPT models',
+          buckets: [
+            { displayName: '5h', remainingFraction: 0.92, resetTime: '2026-11-20T05:30:00Z' },
+            // 周额度刚重置满血无 resetTime 且无关键词时，双桶自动补位为周额度
+            { displayName: 'Secondary Bucket', remainingFraction: 1 },
+          ],
+        },
+      ],
+    },
+  }, now);
+
+  const gPair = selectQuotaPair(groups, 'Gemini 4 Neon (High)');
+  assert.equal(gPair.fiveHourFraction, 0.89);
+  assert.equal(gPair.weeklyFraction, 0);
+
+  const cPair = selectQuotaPair(groups, 'Claude Opus 5.5 (High)');
+  assert.equal(cPair.fiveHourFraction, 0.92);
+  assert.equal(cPair.weeklyFraction, 1);
+});

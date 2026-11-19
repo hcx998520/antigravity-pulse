@@ -28,7 +28,7 @@ import { buildInlineWidgetScript } from './src/ui/inline-bar.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PKG = JSON.parse(readFileSync(join(HERE, 'package.json'), 'utf8'));
-const VERSION = String(PKG.version || '1.2.12');
+const VERSION = String(PKG.version || '1.2.13');
 const IS_HOST_SIDECAR = Boolean(process.env.ANTIGRAVITY_SIDECAR_WEB_PORT);
 const IS_PREVIEW = process.argv.includes('--preview');
 

@@ -88,8 +88,12 @@ export function classifyQuotaBucket(bucket, nowMs = Date.now()) {
   if (!bucket || typeof bucket !== 'object') return null;
   const hint = [
     bucket.window,
+    bucket.windowType,
+    bucket.refreshWindow,
     bucket.refreshWindowLabel,
     bucket.displayName,
+    bucket.label,
+    bucket.title,
     bucket.bucketId,
     bucket.description,
   ]
@@ -102,6 +106,11 @@ export function classifyQuotaBucket(bucket, nowMs = Date.now()) {
   }
   if (/(?:^|[^a-z0-9])(week|weekly|7\s*d|7[\s_-]*day)|每周|周额度|周限额/.test(hint)) {
     return 'week';
+  }
+  const durSec = parseDurationSeconds(bucket.windowDuration ?? bucket.refreshDuration);
+  if (durSec !== null && durSec > 0) {
+    if (durSec <= 6 * 3600) return '5h';
+    if (durSec <= 8 * 86400) return 'week';
   }
   return inferQuotaWindowKind(bucket.resetTime, nowMs);
 }
@@ -136,10 +145,19 @@ export function computeQuotaPacing(remainingFraction, resetTime, windowKind, now
 
 function normalizeBucketEntry(bucket, nowMs) {
   if (!bucket || typeof bucket !== 'object' || bucket.disabled === true) return null;
-  if (typeof bucket.remainingFraction !== 'number' || !Number.isFinite(bucket.remainingFraction)) return null;
-  const frac = Math.max(0, Math.min(1, bucket.remainingFraction));
   const resetTime = typeof bucket.resetTime === 'string' && Number.isFinite(Date.parse(bucket.resetTime)) ? bucket.resetTime : null;
   const kind = classifyQuotaBucket(bucket, nowMs);
+  let frac = null;
+  if (typeof bucket.remainingFraction === 'number' && Number.isFinite(bucket.remainingFraction)) {
+    frac = Math.max(0, Math.min(1, bucket.remainingFraction));
+  } else if (typeof bucket.remainingFraction === 'string' && bucket.remainingFraction.trim() !== '') {
+    const parsed = Number(bucket.remainingFraction);
+    if (Number.isFinite(parsed)) frac = Math.max(0, Math.min(1, parsed));
+  } else if (bucket.remainingFraction === undefined && (resetTime !== null || kind !== null)) {
+    // Protobuf3 JSON 编码默认省略数值为 0 的字段：带合法 resetTime 或窗口标签但缺省 remainingFraction 时，说明该桶已耗尽（0%）
+    frac = 0;
+  }
+  if (frac === null) return null;
   return {
     remainingFraction: frac,
     resetTime,
@@ -147,6 +165,37 @@ function normalizeBucketEntry(bucket, nowMs) {
     pacing: computeQuotaPacing(frac, resetTime, kind, nowMs),
     label: typeof bucket.displayName === 'string' ? bucket.displayName.trim().slice(0, 120) : '',
   };
+}
+
+/**
+ * 在分组包含多个配额桶时，将已识别的 5h/周桶配对；若恰为 2 桶且一侧已明确识别、另一侧因满血缺 resetTime 为 null，自动补位配对。
+ */
+function resolveDualBuckets(entries, nowMs) {
+  let fiveHour = null;
+  let weekly = null;
+  const unknown = [];
+  for (const e of entries) {
+    if (e.windowKind === '5h') {
+      if (!fiveHour || e.remainingFraction < fiveHour.remainingFraction) {
+        fiveHour = { remainingFraction: e.remainingFraction, resetTime: e.resetTime, pacing: e.pacing };
+      }
+    } else if (e.windowKind === 'week') {
+      if (!weekly || e.remainingFraction < weekly.remainingFraction) {
+        weekly = { remainingFraction: e.remainingFraction, resetTime: e.resetTime, pacing: e.pacing };
+      }
+    } else {
+      unknown.push(e);
+    }
+  }
+  if (entries.length === 2 && unknown.length === 1) {
+    const u = unknown[0];
+    if (fiveHour && !weekly) {
+      weekly = { remainingFraction: u.remainingFraction, resetTime: u.resetTime, pacing: computeQuotaPacing(u.remainingFraction, u.resetTime, 'week', nowMs) };
+    } else if (weekly && !fiveHour) {
+      fiveHour = { remainingFraction: u.remainingFraction, resetTime: u.resetTime, pacing: computeQuotaPacing(u.remainingFraction, u.resetTime, '5h', nowMs) };
+    }
+  }
+  return { fiveHour, weekly };
 }
 
 /**
@@ -167,19 +216,7 @@ export function projectQuotaSummary(rawSummary, nowMs = Date.now()) {
     const entries = rawBuckets.map((b) => normalizeBucketEntry(b, nowMs)).filter(Boolean);
     if (entries.length === 0) continue;
 
-    let fiveHour = null;
-    let weekly = null;
-    for (const e of entries) {
-      if (e.windowKind === '5h') {
-        if (!fiveHour || e.remainingFraction < fiveHour.remainingFraction) {
-          fiveHour = { remainingFraction: e.remainingFraction, resetTime: e.resetTime, pacing: e.pacing };
-        }
-      } else if (e.windowKind === 'week') {
-        if (!weekly || e.remainingFraction < weekly.remainingFraction) {
-          weekly = { remainingFraction: e.remainingFraction, resetTime: e.resetTime, pacing: e.pacing };
-        }
-      }
-    }
+    const { fiveHour, weekly } = resolveDualBuckets(entries, nowMs);
 
     const title = (typeof grp.displayName === 'string' && grp.displayName.trim().slice(0, 120)) || entries[0].label || 'Quota';
     const leadEntry = entries.reduce((min, cur) => (cur.remainingFraction < min.remainingFraction ? cur : min), entries[0]);
@@ -202,19 +239,7 @@ export function projectQuotaSummary(rawSummary, nowMs = Date.now()) {
   if (projected.length === 0 && Array.isArray(body.buckets) && body.buckets.length > 0) {
     const entries = body.buckets.slice(0, 20).map((b) => normalizeBucketEntry(b, nowMs)).filter(Boolean);
     if (entries.length > 0) {
-      let fiveHour = null;
-      let weekly = null;
-      for (const e of entries) {
-        if (e.windowKind === '5h') {
-          if (!fiveHour || e.remainingFraction < fiveHour.remainingFraction) {
-            fiveHour = { remainingFraction: e.remainingFraction, resetTime: e.resetTime, pacing: e.pacing };
-          }
-        } else if (e.windowKind === 'week') {
-          if (!weekly || e.remainingFraction < weekly.remainingFraction) {
-            weekly = { remainingFraction: e.remainingFraction, resetTime: e.resetTime, pacing: e.pacing };
-          }
-        }
-      }
+      const { fiveHour, weekly } = resolveDualBuckets(entries, nowMs);
       const leadEntry = entries.reduce((min, cur) => (cur.remainingFraction < min.remainingFraction ? cur : min), entries[0]);
       projected.push({
         title: leadEntry.label || 'Model Quota',
@@ -316,10 +341,17 @@ export function projectUserStatus(userStatus, nowMs = Date.now(), quotaSummary =
       if (id && label) labelMap.set(String(id).slice(0, 120), label);
 
       const q = cfg.quotaInfo;
-      if (q && typeof q.remainingFraction === 'number' && Number.isFinite(q.remainingFraction)) {
-        const frac = Math.max(0, Math.min(1, q.remainingFraction));
+      if (q && typeof q === 'object') {
         const resetTime = typeof q.resetTime === 'string' && Number.isFinite(Date.parse(q.resetTime)) ? q.resetTime : null;
-        rawQuotas.push({ label: label || 'Model', remainingFraction: frac, resetTime });
+        let frac = null;
+        if (typeof q.remainingFraction === 'number' && Number.isFinite(q.remainingFraction)) {
+          frac = Math.max(0, Math.min(1, q.remainingFraction));
+        } else if (q.remainingFraction === undefined && resetTime !== null) {
+          frac = 0;
+        }
+        if (frac !== null) {
+          rawQuotas.push({ label: label || 'Model', remainingFraction: frac, resetTime });
+        }
       }
     }
   }
