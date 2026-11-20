@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 const LEASE_TTL_MS = 12000;
 const STALE_CORRUPT_GRACE_MS = 3000;
 
-function isPidAlive(pid) {
+export function isPidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
@@ -20,8 +20,9 @@ function isPidAlive(pid) {
 }
 
 export class OwnerLease {
-  constructor(leaseFile) {
+  constructor(leaseFile, { lsPort = null } = {}) {
     this.leaseFile = leaseFile;
+    this.lsPort = Number.isInteger(lsPort) && lsPort > 0 && lsPort <= 65535 ? lsPort : null;
     this.token = randomUUID();
     this.startedAt = Date.now();
     this.owned = false;
@@ -29,11 +30,21 @@ export class OwnerLease {
   }
 
   async _readLease() {
-    try {
-      const raw = await readFile(this.leaseFile, 'utf8');
-      const data = JSON.parse(raw);
-      if (data && typeof data === 'object' && typeof data.token === 'string') return data;
-    } catch {}
+    for (let i = 0; i < 3; i++) {
+      try {
+        const raw = await readFile(this.leaseFile, 'utf8');
+        const data = JSON.parse(raw);
+        if (data && typeof data === 'object' && typeof data.token === 'string') return data;
+        return null;
+      } catch (err) {
+        const transient = err?.code === 'EPERM' || err?.code === 'EBUSY' || err?.code === 'EACCES';
+        if (transient && i < 2) {
+          await new Promise((r) => setTimeout(r, 25 * (i + 1)));
+          continue;
+        }
+        return null;
+      }
+    }
     return null;
   }
 
@@ -43,6 +54,7 @@ export class OwnerLease {
       pid: process.pid,
       startedAt: this.startedAt,
       heartbeatAt: Date.now(),
+      ...(this.lsPort ? { lsPort: this.lsPort } : {}),
     });
   }
 
@@ -81,9 +93,10 @@ export class OwnerLease {
   }
 
   /**
-   * 通过原子发布抢占所有权；确认旧锁 PID 已退出、僵死超时或损坏超过宽限期时安全回收重试。
+   * 通过原子发布抢占所有权；确认旧锁 PID 已退出、僵死超时、损坏超过宽限期，或经 canTakeover 证实旧锁为宿主失联孤儿时安全回收重试。
+   * @param {{ canTakeover?: (existing: any) => boolean | Promise<boolean> }} [opts]
    */
-  async claim() {
+  async claim({ canTakeover } = {}) {
     if (!this.leaseFile) {
       this.owned = true;
       return true;
@@ -110,12 +123,34 @@ export class OwnerLease {
         } else {
           const heartbeatAge = Date.now() - Number(existing.heartbeatAt || 0);
           deadOrExpired = !isPidAlive(existing.pid) || heartbeatAge > LEASE_TTL_MS * 2;
+          if (!deadOrExpired && typeof canTakeover === 'function' && existing.token !== this.token) {
+            let takeover = false;
+            try {
+              takeover = Boolean(await canTakeover(existing));
+            } catch {}
+            if (takeover) {
+              // 删除前二次核对 token 未被其他竞争者更新，确保绝不误删刚胜出的新 Owner
+              const recheck = await this._readLease();
+              if (recheck && recheck.token === existing.token) {
+                deadOrExpired = true;
+              }
+            }
+          }
         }
         if (!deadOrExpired) {
           this.owned = false;
           return false;
         }
-        try { await unlink(this.leaseFile); } catch {}
+        for (let u = 0; u < 3; u++) {
+          try {
+            await unlink(this.leaseFile);
+            break;
+          } catch (uErr) {
+            const transient = uErr?.code === 'EPERM' || uErr?.code === 'EBUSY' || uErr?.code === 'EACCES';
+            if (!transient || u === 2) break;
+            await new Promise((r) => setTimeout(r, 35 * (u + 1)));
+          }
+        }
       } catch {
         this.owned = false;
         return false;
@@ -135,14 +170,14 @@ export class OwnerLease {
     const tmp = `${this.leaseFile}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
     try {
       await writeFile(tmp, this._payload(), { encoding: 'utf8', mode: 0o600 });
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < 6; i++) {
         try {
           await rename(tmp, this.leaseFile);
           return true;
         } catch (err) {
           const transient = err?.code === 'EPERM' || err?.code === 'EBUSY' || err?.code === 'EACCES';
-          if (!transient || i === 2) throw err;
-          await new Promise((r) => setTimeout(r, 60 * (i + 1)));
+          if (!transient || i === 5) throw err;
+          await new Promise((r) => setTimeout(r, 40 * (i + 1)));
         }
       }
       return true;

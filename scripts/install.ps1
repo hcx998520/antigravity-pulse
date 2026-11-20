@@ -6,10 +6,10 @@
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-try { $Host.UI.RawUI.WindowTitle = 'Antigravity TokenMeter v1.2.14 安装器' } catch {}
+try { $Host.UI.RawUI.WindowTitle = 'Antigravity TokenMeter v1.2.15 安装器' } catch {}
 
 Write-Host '================================================================' -ForegroundColor Cyan
-Write-Host '  Antigravity TokenMeter v1.2.14 (MIT License)' -ForegroundColor Cyan
+Write-Host '  Antigravity TokenMeter v1.2.15 (MIT License)' -ForegroundColor Cyan
 Write-Host '  支持侧边栏面板 + 可选实验性底部内嵌状态条（不修改 app.asar）' -ForegroundColor Cyan
 Write-Host '================================================================' -ForegroundColor Cyan
 Write-Host ''
@@ -277,7 +277,20 @@ try {
 
     $PrefsFile = Join-Path $ConfigDir 'preferences.json'
     if (-not (Test-Path -LiteralPath $PrefsFile)) {
-        Write-AtomicUtf8 $PrefsFile "{`n  `"language`": `"zh-CN`",`n  `"theme`": `"swiss`",`n  `"showSpeed`": true,`n  `"showCache`": true,`n  `"showContext`": true,`n  `"showQuota`": true,`n  `"showToday`": false,`n  `"showMonth`": true,`n  `"showCost`": false,`n  `"version`": 1`n}`n"
+        $initLang = 'zh-CN'
+        if ($env:AG_TM_LANG -eq 'en') {
+            $initLang = 'en'
+        } elseif ($env:AG_TM_LANG -match '^(?i)zh') {
+            $initLang = 'zh-CN'
+        } else {
+            $uiCultureName = ''
+            try { $uiCultureName = [System.Globalization.CultureInfo]::InstalledUICulture.Name } catch {}
+            if (-not $uiCultureName) { try { $uiCultureName = (Get-UICulture).Name } catch {} }
+            if ($uiCultureName -and ($uiCultureName -notmatch '^(?i)zh')) {
+                $initLang = 'en'
+            }
+        }
+        Write-AtomicUtf8 $PrefsFile "{`n  `"language`": `"$initLang`",`n  `"theme`": `"swiss`",`n  `"showSpeed`": true,`n  `"showCache`": true,`n  `"showContext`": true,`n  `"showQuota`": true,`n  `"showToday`": false,`n  `"showMonth`": true,`n  `"showCost`": false,`n  `"version`": 1`n}`n"
     }
 
     if (Test-Path -LiteralPath $ConfigJsonFile) {
@@ -315,7 +328,7 @@ Write-Host '      已在 config.json 中同时启用 plugin 与 sidecar！' -For
 
 Write-Host ''
 Write-Host '================================================================' -ForegroundColor Green
-Write-Host '  Antigravity TokenMeter v1.2.14 安装完成！' -ForegroundColor Green
+Write-Host '  Antigravity TokenMeter v1.2.15 安装完成！' -ForegroundColor Green
 Write-Host '================================================================' -ForegroundColor Green
 Write-Host ''
 if ($inlineEnabled) {

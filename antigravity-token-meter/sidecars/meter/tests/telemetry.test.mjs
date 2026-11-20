@@ -34,7 +34,7 @@ test('inferQuotaWindowKind 正确区分 5h 与周额度并在异常/过期时间
   assert.equal(inferQuotaWindowKind(null, now), null);
 });
 
-test('projectQuotaSummary 与 selectQuotaPair 精准产出左 5h / 右周额度并优先匹配当前模型', () => {
+test('projectQuotaSummary 与 selectQuotaPair 精准产出左 5h / 右周额度并兼容 Orchestrator 与连字符 ID', () => {
   const now = Date.parse('2026-11-19T12:00:00Z');
   const summary = {
     response: {
@@ -53,17 +53,33 @@ test('projectQuotaSummary 与 selectQuotaPair 精准产出左 5h / 右周额度�
             { displayName: 'Weekly Limit Remaining', window: 'weekly', remainingFraction: 0.65, resetTime: '2026-11-24T01:00:00Z' },
           ],
         },
+        {
+          displayName: 'Claude Opus 5.5',
+          buckets: [
+            { displayName: '5h', window: '5h', remainingFraction: 0.42, resetTime: '2026-11-19T15:00:00Z' },
+          ],
+        },
       ],
     },
   };
   const groups = projectQuotaSummary(summary, now);
-  assert.equal(groups.length, 2);
+  assert.equal(groups.length, 3);
   assert.equal(groups[0].fiveHour.remainingFraction, 0.97);
   assert.equal(groups[0].weekly.remainingFraction, 0.82);
 
   const pairCarbon = selectQuotaPair(groups, 'Gemini 4 Carbon (High)');
   assert.equal(pairCarbon.fiveHourFraction, 0.5);
   assert.equal(pairCarbon.weeklyFraction, 0.65);
+
+  // "Orchestrator (Carbon)" 与 "gemini-pro-orchestrator" 保留括号代号，精准命中 Gemini 4 Carbon
+  const pairOrch = selectQuotaPair(groups, 'Orchestrator (Carbon)');
+  assert.equal(pairOrch.title, 'Gemini 4 Carbon');
+  assert.equal(pairOrch.fiveHourFraction, 0.5);
+
+  // 连字符原始 ID "claude-opus-5-5-high" 精准命中 "Claude Opus 5.5"
+  const pairOpusDash = selectQuotaPair(groups, 'claude-opus-5-5-high');
+  assert.equal(pairOpusDash.title, 'Claude Opus 5.5');
+  assert.equal(pairOpusDash.fiveHourFraction, 0.42);
 
   const pairDefault = selectQuotaPair(groups, null);
   assert.equal(pairDefault.fiveHourFraction, 0.97);
@@ -108,7 +124,7 @@ test('projectUserStatus 立即剔除邮箱等敏感字段；computeConversationT
           usage: { inputTokens: '1000', cacheReadTokens: '9000', outputTokens: '1500', thinkingOutputTokens: '1000', responseOutputTokens: '500', responseId: 'raw-secret-resp-1' },
         },
       },
-      // 同 responseId 重复出现时只计一次（最终快照覆盖），UI 与账本口径一致
+      // 同 responseId 重复出现时只计一次（最终快照合并），UI 与账本口径一致
       {
         stepIndices: [1, 2],
         chatModel: {
@@ -141,6 +157,53 @@ test('projectUserStatus 立即剔除邮箱等敏感字段；computeConversationT
   assert.equal(result.ledgerEvents.some((e) => e.id.includes('raw-secret-resp-1')), false);
 });
 
+test('Thinking Token 在包含式、分离式与纯思考阶段既不漏算也不双倍重复计费，且缓存保鲜活跃时间准确', () => {
+  const nowMs = Date.parse('2026-11-20T10:05:10Z');
+  const conv = computeConversationTelemetry({
+    cascadeId: '55555555-5555-5555-5555-555555555555',
+    nowMs,
+    generatorMetadata: [
+      // 形态 1（包含式）：outputTokens(1500) = responseOutputTokens(500) + thinkingOutputTokens(1000) -> 计费输出 1500
+      {
+        stepIndices: [1],
+        chatModel: {
+          modelDisplayName: 'Gemini 4 Neon (High)',
+          requestTime: '2026-11-20T09:50:00Z',
+          usage: { inputTokens: '0', cacheReadTokens: '10000', outputTokens: '1500', responseOutputTokens: '500', thinkingOutputTokens: '1000', responseId: 't-inc' },
+        },
+      },
+      // 形态 2（分离式）：outputTokens 仅填了正文 500，thinkingOutputTokens 另填 1000 -> 自动补齐为 1500 绝不漏算
+      {
+        stepIndices: [2],
+        chatModel: {
+          modelDisplayName: 'Gemini 4 Neon (High)',
+          requestTime: '2026-11-20T09:55:00Z',
+          usage: { inputTokens: '0', cacheReadTokens: '10000', outputTokens: '500', responseOutputTokens: '500', thinkingOutputTokens: '1000', responseId: 't-sep' },
+        },
+      },
+      // 形态 3（纯思考流式阶段 + 长推理 300s 刚结束）：outputTokens 为 0，thinkingOutputTokens 为 1000 -> 计费输出 1000
+      {
+        stepIndices: [3],
+        chatModel: {
+          modelDisplayName: 'Gemini 4 Neon (High)',
+          requestTime: '2026-11-20T10:00:05Z',
+          streamingDuration: '300.0s', // 结束于 10:05:05Z（距 nowMs 仅 5 秒）
+          usage: { inputTokens: '0', cacheReadTokens: '10000', outputTokens: '0', thinkingOutputTokens: '1000', responseId: 't-zero' },
+        },
+      },
+    ],
+  });
+
+  // 总输出应精确为 1500 + 1500 + 1000 = 4000（正文 1000 + 思考 3000）
+  assert.equal(conv.tokens.output, 4000);
+  assert.equal(conv.tokens.responseOutput, 1000);
+  assert.equal(conv.tokens.thinkingOutput, 3000);
+  // 费用：30,000 cacheRead ($0.15/1M = $0.0045) + 4,000 output ($15/1M = $0.06) = $0.0645
+  assert.equal(conv.costUsd, 0.0645);
+  // lastRequestTime 反映第 3 步流式结束时刻 10:05:05Z，而非 5 分钟前的开始时刻 10:00:05Z
+  assert.equal(conv.lastRequestTime, '2026-11-20T10:05:05.000Z');
+});
+
 test('selectQuotaPair 支持按模型家族匹配官方分组且不跨组借用缺失侧；上下文满窗与 thinkingRatio 边界准确', () => {
   const now = Date.parse('2026-11-19T12:00:00Z');
   const groups = projectQuotaSummary({
@@ -163,18 +226,22 @@ test('selectQuotaPair 支持按模型家族匹配官方分组且不跨组借用�
     },
   }, now);
 
-  // 切到 Claude 对话必须精准选中 Claude and GPT models，且该组无周额度时绝不借用 Gemini 的 91%
+  // 切到 Claude 或 GPT-OSS 对话必须精准选中 Claude and GPT models，且该组无周额度时绝不借用 Gemini 的 91%
   const claudePair = selectQuotaPair(groups, 'Claude Opus 5.5 (High)');
   assert.equal(claudePair.title, 'Claude and GPT models');
   assert.equal(claudePair.fiveHourFraction, 0.11);
   assert.equal(claudePair.weeklyFraction, null);
 
-  const geminiPair = selectQuotaPair(groups, 'Gemini 4 Neon (High)');
-  assert.equal(geminiPair.title, 'Gemini Models');
-  assert.equal(geminiPair.fiveHourFraction, 0.95);
-  assert.equal(geminiPair.weeklyFraction, 0.91);
+  const gptOssPair = selectQuotaPair(groups, 'GPT-OSS 120B (Medium)');
+  assert.equal(gptOssPair.title, 'Claude and GPT models');
+  assert.equal(gptOssPair.fiveHourFraction, 0.11);
 
-  // 上下文 100% 满窗 -> estimatedTurnsLeft === 0；thinkingRatio 钳制 <= 1；切模型后 model 取最新请求
+  const geminiOrchPair = selectQuotaPair(groups, 'Orchestrator (Carbon)');
+  assert.equal(geminiOrchPair.title, 'Gemini Models');
+  assert.equal(geminiOrchPair.fiveHourFraction, 0.95);
+  assert.equal(geminiOrchPair.weeklyFraction, 0.91);
+
+  // 上下文 100% 满窗 -> estimatedTurnsLeft === 0；全思考输出 thinkingRatio === 1；切模型后 model 取最新请求
   const fullCtx = computeConversationTelemetry({
     cascadeId: '22222222-2222-2222-2222-222222222222',
     generatorMetadata: [
@@ -191,7 +258,7 @@ test('selectQuotaPair 支持按模型家族匹配官方分组且不跨组借用�
         chatModel: {
           modelDisplayName: 'Claude Opus 5.5 (High)',
           chatStartMetadata: { contextWindowMetadata: { estimatedTokensUsed: 512000, maxContextTokens: 512000 } },
-          usage: { inputTokens: '2000', outputTokens: '100', responseId: 'r2' },
+          usage: { inputTokens: '2000', outputTokens: '100', thinkingOutputTokens: '100', responseId: 'r2' },
         },
       },
     ],
@@ -199,6 +266,7 @@ test('selectQuotaPair 支持按模型家族匹配官方分组且不跨组借用�
   assert.equal(fullCtx.model, 'Claude Opus 5.5 (High)');
   assert.equal(fullCtx.context.estimatedTurnsLeft, 0);
   assert.equal(fullCtx.thinkingRatio, 1);
+  assert.equal(fullCtx.pricing.longContextApplied, true); // usedTokens 512k > 200k，实时单价提示自动切换为 >200k 阶梯
 });
 
 test('Protobuf3 省略 0% remainingFraction 或刚重置缺 resetTime 的周额度桶绝不丢失', () => {

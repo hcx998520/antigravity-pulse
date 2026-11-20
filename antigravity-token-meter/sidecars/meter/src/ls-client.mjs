@@ -5,14 +5,45 @@
  * 1. 仅使用宿主注入的显式回环端点（ANTIGRAVITY_LS_ADDRESS + ANTIGRAVITY_CSRF_TOKEN），
  *    彻底移除任何系统进程扫描或凭据抓取逻辑；
  * 2. 仅允许连接本地回环地址（127.0.0.1 / ::1 / localhost），agent: false 绕过应用层代理；
- * 3. 单次请求与整条重试链共享硬截止时间，防止慢连接阻塞轮询。
+ * 3. 单次请求与整条重试链共享硬截止时间，防止慢连接阻塞轮询；
+ * 4. 端点探测支持本地 GetAllCascadeTrajectories 兜底，外网/云端状态超时不连坐断开本地遥测。
  */
 import http from 'node:http';
 import https from 'node:https';
+import net from 'node:net';
 
 const SERVICE_PREFIX = '/exa.language_server_pb.LanguageServerService/';
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 const MAX_RPC_BYTES = 16 * 1024 * 1024;
+
+/**
+ * 极速检测本地回环端口是否仍在监听（零代理、仅允许回环地址，用于判断宿主 LS 是否已退出）。
+ * @param {number} port
+ * @param {string} [hostname]
+ * @param {number} [timeoutMs]
+ */
+export function isLoopbackPortOpen(port, hostname = '127.0.0.1', timeoutMs = 800) {
+  const cleanHost = String(hostname || '127.0.0.1').replace(/^\[|\]$/g, '');
+  if (!LOOPBACK.has(cleanHost) || !Number.isInteger(port) || port < 1 || port > 65535) {
+    return Promise.resolve(false);
+  }
+  const host = cleanHost === 'localhost' ? '127.0.0.1' : cleanHost;
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { sock.destroy(); } catch {}
+      resolve(ok);
+    };
+    const sock = net.createConnection({ host, port, family: host.includes(':') ? 6 : 4 });
+    const timer = setTimeout(() => done(false), Math.max(150, Math.min(3000, timeoutMs)));
+    timer.unref?.();
+    sock.once('connect', () => done(true));
+    sock.once('error', () => done(false));
+  });
+}
 
 export function parseLoopbackEndpoint(rawAddr) {
   if (!rawAddr || typeof rawAddr !== 'string') return null;
@@ -122,7 +153,9 @@ export function postLoopbackRpc({
 
     const hardTimer = setTimeout(() => {
       req.destroy();
-      finish(new Error(`rpc_timeout_${method}`));
+      const err = new Error(`rpc_timeout_${method}`);
+      err.isTimeout = true;
+      finish(err);
     }, boundedTimeout);
     hardTimer.unref?.();
 
@@ -148,6 +181,19 @@ export class LanguageServerClient {
     return this._resolved ? { ...this._resolved } : null;
   }
 
+  /**
+   * 返回宿主显式注入的回环地址与端口（不含敏感 csrfToken），用于冷启动早期 Hub 端口校验。
+   */
+  get configuredEndpoint() {
+    const envAddr = parseLoopbackEndpoint(this.env.ANTIGRAVITY_LS_ADDRESS);
+    if (!envAddr || !this.env.ANTIGRAVITY_CSRF_TOKEN) return null;
+    return {
+      protocol: envAddr.protocol,
+      hostname: envAddr.hostname,
+      port: envAddr.port,
+    };
+  }
+
   async resolveEndpoint(force = false, deadlineMs = Date.now() + 4000) {
     if (this._resolved && !force) return this._resolved;
     if (this._resolving) return this._resolving;
@@ -158,29 +204,49 @@ export class LanguageServerClient {
       if (!envAddr || !envCsrf) return null;
 
       const protocols = envAddr.protocol ? [envAddr.protocol] : ['https:', 'http:'];
+      const probes = [
+        { method: 'GetUserStatus', body: { metadata: { ideName: 'antigravity' } }, capMs: 1800 },
+        { method: 'GetAllCascadeTrajectories', body: {}, capMs: 1600 },
+      ];
+
       for (const protocol of protocols) {
-        const remaining = deadlineMs - Date.now();
-        if (remaining < 300) break;
-        try {
-          await this.rpcImpl({
-            protocol,
-            hostname: envAddr.hostname,
-            port: envAddr.port,
-            csrfToken: envCsrf,
-            method: 'GetUserStatus',
-            body: { metadata: { ideName: 'antigravity' } },
-            timeoutMs: Math.min(2500, remaining),
-          });
-          this._generation++;
-          this._resolved = {
-            protocol,
-            hostname: envAddr.hostname,
-            port: envAddr.port,
-            csrfToken: envCsrf,
-            generation: this._generation,
-          };
-          return this._resolved;
-        } catch {}
+        for (let i = 0; i < probes.length; i++) {
+          const remaining = deadlineMs - Date.now();
+          if (remaining < 250) break;
+          const probe = probes[i];
+          try {
+            await this.rpcImpl({
+              protocol,
+              hostname: envAddr.hostname,
+              port: envAddr.port,
+              csrfToken: envCsrf,
+              method: probe.method,
+              body: probe.body,
+              timeoutMs: Math.min(probe.capMs, remaining),
+            });
+            this._generation++;
+            this._resolved = {
+              protocol,
+              hostname: envAddr.hostname,
+              port: envAddr.port,
+              csrfToken: envCsrf,
+              generation: this._generation,
+            };
+            return this._resolved;
+          } catch (err) {
+            // 若端口拒绝连接、TLS 握手不匹配或 CSRF 鉴权失败，直接切换下一个协议，无需在同一协议重复探测
+            const code = err?.code || '';
+            const status = err?.statusCode || 0;
+            const protocolOrConnErr =
+              code === 'ECONNREFUSED' ||
+              code === 'ECONNRESET' ||
+              code.startsWith('ERR_SSL_') ||
+              code === 'EPROTO' ||
+              status === 401 ||
+              status === 403;
+            if (protocolOrConnErr) break;
+          }
+        }
       }
       return null;
     })().finally(() => {
@@ -200,7 +266,7 @@ export class LanguageServerClient {
     try {
       return await this.rpcImpl({ ...ep, method, body, timeoutMs: rem1 });
     } catch (err) {
-      // 明确的业务 4xx（如 404 不支持该 RPC 或会话不存在）说明端点可达，不清空缓存也不触发无效重连抖动
+      // 明确的业务 4xx（如 404 不支持该 RPC 或刚新建会话尚未落盘）说明端点可达，不清空缓存也不重连抖动
       const isClientErr =
         Number.isInteger(err?.statusCode) &&
         err.statusCode >= 400 &&
@@ -208,6 +274,12 @@ export class LanguageServerClient {
         err.statusCode !== 401 &&
         err.statusCode !== 403;
       if (isClientErr) throw err;
+
+      // 单纯的慢请求超时（如云端配额刷新偶发耗时）不说明本地协议变更，保留已解析端点避免引发雪崩重探
+      if (err?.isTimeout === true || String(err?.message || '').startsWith('rpc_timeout_')) {
+        throw err;
+      }
+
       if (this._resolved && this._resolved.generation === ep.generation) {
         this._resolved = null;
       }
@@ -219,19 +291,19 @@ export class LanguageServerClient {
     }
   }
 
-  getUserStatus() {
-    return this.call('GetUserStatus', { metadata: { ideName: 'antigravity' } });
+  getUserStatus(budgetMs = 4500) {
+    return this.call('GetUserStatus', { metadata: { ideName: 'antigravity' } }, budgetMs);
   }
 
-  retrieveUserQuotaSummary(forceRefresh = false) {
-    return this.call('RetrieveUserQuotaSummary', { request: {}, forceRefresh: Boolean(forceRefresh) });
+  retrieveUserQuotaSummary(forceRefresh = false, budgetMs = 2800) {
+    return this.call('RetrieveUserQuotaSummary', { request: {}, forceRefresh: Boolean(forceRefresh) }, budgetMs);
   }
 
-  getAllTrajectories() {
-    return this.call('GetAllCascadeTrajectories', {});
+  getAllTrajectories(budgetMs = 3500) {
+    return this.call('GetAllCascadeTrajectories', {}, budgetMs);
   }
 
-  getGeneratorMetadata(cascadeId) {
-    return this.call('GetCascadeTrajectoryGeneratorMetadata', { cascadeId });
+  getGeneratorMetadata(cascadeId, budgetMs = 3200) {
+    return this.call('GetCascadeTrajectoryGeneratorMetadata', { cascadeId }, budgetMs);
   }
 }

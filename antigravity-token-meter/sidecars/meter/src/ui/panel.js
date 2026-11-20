@@ -15,6 +15,8 @@
   let lang = 'zh-CN';
   let prefs = { language: 'zh-CN', theme: 'swiss', showSpeed: true, showCache: true, showContext: true, showQuota: true, showToday: false, showMonth: true, showCost: false, version: 0 };
   let confirmedVersion = 0;
+  let pendingPrefCount = 0;
+  let lastData = null;
   let reqSeq = 0;
 
   function t(k) { return (DICT[lang] && DICT[lang][k]) || (DICT['zh-CN'] && DICT['zh-CN'][k]) || k; }
@@ -51,6 +53,14 @@
     if (v < 0.01) return '<$0.01';
     if (v >= 1000) return '~$' + (v / 1000).toFixed(2) + 'K';
     return '~$' + v.toFixed(2);
+  }
+  function fmtUsdPrecise(usd) {
+    const v = Number(usd);
+    if (!Number.isFinite(v) || v <= 0) return null;
+    if (v < 0.0001) return '<$0.0001';
+    if (v < 0.01) return '~$' + v.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+    if (v >= 1000) return '~$' + v.toFixed(2);
+    return '~$' + v.toFixed(4).replace(/00$/, '').replace(/(\.\d\d)0$/, '$1');
   }
   function fmtPct(f) { return typeof f === 'number' && Number.isFinite(f) ? Math.round(Math.max(0, Math.min(1, f)) * 100) + '%' : '--'; }
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
@@ -116,9 +126,20 @@
     }
   }
 
-  function renderSpark(points) {
-    if (!Array.isArray(points) || points.length < 2) return '<div style="color:var(--faint);font-size:11.5px;padding:10px 0;text-align:center;">' + esc(t('noData')) + '</div>';
+  function renderSpark(points, hasConv) {
+    if (!Array.isArray(points) || points.length === 0) {
+      const msg = hasConv ? t('noData') : t('newChatHint');
+      return '<div style="color:var(--faint);font-size:11.5px;padding:10px 0;text-align:center;">' + esc(msg) + '</div>';
+    }
     const w = 310, h = 50, padX = 6, padY = 8;
+    const midY = (h / 2).toFixed(1);
+    if (points.length === 1) {
+      const cx = (w / 2).toFixed(1);
+      return `<svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" style="display:block;overflow:visible">` +
+        `<line x1="0" y1="${midY}" x2="${w}" y2="${midY}" stroke="var(--hairline)" stroke-dasharray="2 3"/>` +
+        `<circle cx="${cx}" cy="${midY}" r="5.5" fill="var(--accent)" fill-opacity="0.16"/>` +
+        `<circle cx="${cx}" cy="${midY}" r="3" fill="var(--accent)" stroke="var(--card)" stroke-width="1.5"/></svg>`;
+    }
     const vals = points.map((p) => { const v = Number(p && p.tps); return Number.isFinite(v) && v >= 0 ? v : 0; });
     const min = Math.min(...vals), max = Math.max(...vals), span = Math.max(1, max - min);
     const pts = vals.map((v, i) => [
@@ -128,7 +149,6 @@
     const coords = pts.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`);
     const area = `${padX},${h - 2} ${coords.join(' ')} ${w - padX},${h - 2}`;
     const last = pts[pts.length - 1];
-    const midY = (h / 2).toFixed(1);
     const nodes = pts.slice(0, -1).map((p) =>
       `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2.2" fill="var(--card)" stroke="currentColor" stroke-width="1.35"/>`
     ).join('');
@@ -157,6 +177,39 @@
     return r.json();
   }
 
+  async function updatePrefsOptimistic(patch) {
+    const prevPrefs = { ...prefs };
+    prefs = { ...prefs, ...patch };
+    lang = prefs.language === 'en' ? 'en' : 'zh-CN';
+    applyStaticLabels();
+    renderToggles();
+    if (lastData) renderSnapshot(lastData);
+
+    pendingPrefCount++;
+    let committed = false;
+    try {
+      const next = await apiPost('./api/preferences', patch);
+      if (next && !next.error) {
+        committed = true;
+        prefs = { ...prefs, ...next };
+        confirmedVersion = Math.max(confirmedVersion, safeInt(next.version));
+        lang = prefs.language === 'en' ? 'en' : 'zh-CN';
+        applyStaticLabels();
+        renderToggles();
+        if (lastData) renderSnapshot(lastData);
+      }
+    } catch {} finally {
+      pendingPrefCount = Math.max(0, pendingPrefCount - 1);
+      if (!committed && pendingPrefCount === 0) {
+        prefs = prevPrefs;
+        lang = prefs.language === 'en' ? 'en' : 'zh-CN';
+        applyStaticLabels();
+        renderToggles();
+        if (lastData) renderSnapshot(lastData);
+      }
+    }
+  }
+
   function renderToggles() {
     const items = [
       ['showSpeed', t('optSpeed')], ['showCache', t('optCache')],
@@ -170,18 +223,8 @@
       return `<label class="pill ${on ? 'on' : ''}"><input type="checkbox" data-k="${esc(k)}" ${on ? 'checked' : ''}/><span class="pill-dot"></span>${esc(label)}</label>`;
     }).join('');
     box.querySelectorAll('input').forEach((inp) => {
-      inp.onchange = async () => {
-        try {
-          const next = await apiPost('./api/preferences', { [inp.dataset.k]: inp.checked });
-          if (next && !next.error) {
-            prefs = next;
-            confirmedVersion = Math.max(confirmedVersion, safeInt(next.version));
-            renderToggles();
-            if (inp.dataset.k === 'showCost') void refresh();
-          }
-        } catch {
-          inp.checked = !inp.checked;
-        }
+      inp.onchange = () => {
+        void updatePrefsOptimistic({ [inp.dataset.k]: inp.checked });
       };
     });
   }
@@ -198,32 +241,33 @@
     ];
     seg.innerHTML = list.map(([id, lbl]) => `<button type="button" class="${cur === id ? 'active' : ''}" data-th="${id}">${esc(lbl)}</button>`).join('');
     seg.querySelectorAll('button').forEach((btn) => {
-      btn.onclick = async () => {
-        try {
-          const next = await apiPost('./api/preferences', { theme: btn.dataset.th });
-          if (next && !next.error) {
-            prefs = next;
-            confirmedVersion = Math.max(confirmedVersion, safeInt(next.version));
-            renderThemeSeg();
-          }
-        } catch {}
+      btn.onclick = () => {
+        void updatePrefsOptimistic({ theme: btn.dataset.th });
       };
     });
   }
 
   function applyStaticLabels() {
+    lang = prefs.language === 'en' ? 'en' : 'zh-CN';
     document.documentElement.lang = lang;
+    document.documentElement.setAttribute('lang', lang);
     document.querySelectorAll('[data-k]').forEach((el) => { el.textContent = t(el.dataset.k); });
-    document.getElementById('lang-btn').textContent = lang === 'en' ? '中文' : 'EN';
+    const langBtn = document.getElementById('lang-btn');
+    langBtn.textContent = lang === 'en' ? 'EN' : '中';
+    langBtn.title = lang === 'en' ? 'Switch to Chinese' : '切换为英文';
     document.getElementById('refresh-btn').textContent = t('refresh');
     document.getElementById('quota-legend').textContent = t('paceLegend');
     renderThemeSeg();
   }
 
-  function renderHeatmap(days, todayDate) {
+  function renderHeatmap(days, todayDate, showCost) {
     const dayMap = Object.create(null);
+    const costMap = Object.create(null);
     (days || []).forEach((d) => {
-      if (d && d.date) dayMap[d.date] = safeInt(d.total);
+      if (d && d.date) {
+        dayMap[d.date] = safeInt(d.total);
+        costMap[d.date] = Number(d.costUsd) || 0;
+      }
     });
     const now = parseBaseDate(todayDate);
     const todayDow = now.getDay(); // 0=周日..6=周六，按真实星期对齐不跨天错位
@@ -241,13 +285,15 @@
         dt.setDate(dt.getDate() - offsetDays);
         const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
         const val = dayMap[key] || 0;
+        const cost = costMap[key] || 0;
         if (val > visibleMax) visibleMax = val;
-        cells.push({ x: c * step, y: r * step, key, val });
+        cells.push({ x: c * step, y: r * step, key, val, cost });
       }
     }
     const rects = cells.map((it) => {
       const cls = it.val <= 0 ? 'h-c0' : it.val > visibleMax * 0.72 ? 'h-c4' : it.val > visibleMax * 0.40 ? 'h-c3' : it.val > visibleMax * 0.14 ? 'h-c2' : 'h-c1';
-      return `<rect x="${it.x}" y="${it.y}" width="${cell}" height="${cell}" rx="2.4" class="${cls}"><title>${esc(`${it.key}: ${fmtTokens(it.val)} tokens`)}</title></rect>`;
+      const costTip = showCost && it.cost > 0 ? ` · ${fmtUsd(it.cost)}` : '';
+      return `<rect x="${it.x}" y="${it.y}" width="${cell}" height="${cell}" rx="2.4" class="${cls}"><title>${esc(`${it.key}: ${fmtTokens(it.val)} tokens${costTip}`)}</title></rect>`;
     }).join('');
     return `<svg viewBox="0 0 ${w} ${h}" width="100%" preserveAspectRatio="xMidYMid meet">${rects}</svg>`;
   }
@@ -264,6 +310,143 @@
     return `<div class="q-sub"><span class="q-tag">${esc(tag)}</span><div class="q-track"><div class="q-bar"><div class="q-fill ${cls}" style="width:${pct}%"></div></div>${tick}</div><span class="q-sub-val"><b>${pct}%</b><em>${esc(fmtCountdown(resetIso))}</em></span></div>`;
   }
 
+  function syncUsageCostCell(elId, showCost, usd, savedUsd) {
+    const el = document.getElementById(elId);
+    if (!el) return;
+    const txt = showCost ? fmtUsd(usd) : null;
+    el.textContent = txt || '';
+    if (!showCost || !txt) {
+      el.title = '';
+      return;
+    }
+    const precise = fmtUsdPrecise(usd) || txt;
+    const savedStr = savedUsd > 0 ? fmtUsd(savedUsd) : null;
+    el.title = `${t('costLabel')}: ${precise}` + (savedStr ? ` · ${t('costSaved')} ${savedStr}` : '');
+  }
+
+  function renderSnapshot(data) {
+    if (!data) return;
+    if (data.version) document.getElementById('ver').textContent = 'v' + String(data.version);
+
+    const diag = data.integration || {};
+    const banner = document.getElementById('diag-banner');
+    const ok = diag.state === 'mounted' || diag.state === 'waiting_composer';
+    banner.className = 'banner ' + (ok ? 'ok' : 'warn');
+    banner.textContent = (ok ? '' : '⚠ ') + tDiag(diag.code || diag.state);
+
+    const hasConv = Boolean(data.conversation);
+    const c = data.conversation || {};
+    const heroSpeed = fmtFixed(c.latestTps, 1) || fmtFixed(c.tps, 1) || '--';
+    document.getElementById('k-latest').textContent = heroSpeed;
+    document.getElementById('k-session').textContent = fmtFixed(c.tps, 1) || '--';
+    document.getElementById('k-cache').textContent = fmtPct(c.cacheHitRate);
+    const ctxFrac = c.context ? c.context.usedFraction : null;
+    syncContextRing(document.getElementById('k-ctx-ring'), ctxFrac);
+    document.getElementById('k-ctx').textContent = c.context ? fmtPct(ctxFrac) : '--';
+    const showCost = prefs.showCost === true;
+    const convCostStr = showCost && c.costUsd > 0 ? fmtUsd(c.costUsd) : null;
+    const modelBase = c.model || (data.conversationUnavailable ? t('convUnavailable') : '');
+    document.getElementById('model-name').textContent = modelBase + (convCostStr ? ` · ${convCostStr}` : '');
+    document.getElementById('sparkline').innerHTML = renderSpark(c.sparkline, hasConv);
+
+    const quotas = data.quotas || [];
+    document.getElementById('quotas').innerHTML = quotas.length
+      ? quotas.map((item) => {
+          if (item.fiveHour && item.weekly) {
+            const p5 = Math.round(Math.max(0, Math.min(1, Number(item.fiveHour.remainingFraction) || 0)) * 100);
+            const pw = Math.round(Math.max(0, Math.min(1, Number(item.weekly.remainingFraction) || 0)) * 100);
+            return `<div class="q-item"><div class="q-meta"><span class="q-name">${esc(item.title)}</span><span class="q-pair" title="${esc(t('quotaPairTip'))}">${p5}%<span class="q-slash">/</span>${pw}%</span></div>` +
+              renderSubBar(t('quotaTag5h'), item.fiveHour.remainingFraction, item.fiveHour.resetTime, item.fiveHour.pacing) +
+              renderSubBar(t('quotaTagWeek'), item.weekly.remainingFraction, item.weekly.resetTime, item.weekly.pacing) +
+            `</div>`;
+          }
+          let kind = item.windowKind === '5h' || item.windowKind === 'week' ? item.windowKind : null;
+          if (!kind && item.resetTime) {
+            const ms = Date.parse(item.resetTime) - Date.now();
+            if (Number.isFinite(ms) && ms > 0) kind = ms <= 5.5 * 3600000 ? '5h' : ms <= 8 * 86400000 ? 'week' : null;
+          }
+          const tag = kind ? (kind === '5h' ? t('quotaTag5h') : t('quotaTagWeek')) : '·';
+          return `<div class="q-item"><div class="q-meta"><span class="q-name">${esc(item.title)}</span></div>${renderSubBar(tag, item.remainingFraction, item.resetTime, item.pacing)}</div>`;
+        }).join('')
+      : `<div style="color:var(--faint);font-size:11.5px;">${esc(t('noData'))}</div>`;
+
+    const usage = data.usage || {};
+    document.getElementById('u-today').textContent = fmtTokens(usage.todayTokens);
+    document.getElementById('u-week').textContent = fmtTokens(usage.weekTokens);
+    document.getElementById('u-month').textContent = fmtTokens(usage.monthTokens);
+    document.getElementById('u-total').textContent = fmtTokens(usage.totalTokens);
+    syncUsageCostCell('u-today-cost', showCost, usage.todayCostUsd, usage.todayCacheSavingsUsd);
+    syncUsageCostCell('u-week-cost', showCost, usage.weekCostUsd, usage.weekCacheSavingsUsd);
+    syncUsageCostCell('u-month-cost', showCost, usage.monthCostUsd, usage.monthCacheSavingsUsd);
+    syncUsageCostCell('u-total-cost', showCost, usage.totalCostUsd, usage.lifetimeCacheSavingsUsd);
+
+    const uMetaEl = document.getElementById('u-meta');
+    if (uMetaEl) {
+      const metaParts = [];
+      if (safeInt(usage.monthRequests) > 0) metaParts.push(`${safeInt(usage.monthRequests).toLocaleString()} ${t('requests')}`);
+      if (safeInt(usage.activeDays) > 0) metaParts.push(`${safeInt(usage.activeDays)} ${t('activeDays')}`);
+      uMetaEl.textContent = metaParts.join(' · ');
+    }
+    const heatEl = document.getElementById('heatmap');
+    if (heatEl) heatEl.innerHTML = renderHeatmap(usage.days, usage.todayDate, showCost);
+    const savedStr = showCost ? fmtUsd(usage.lifetimeCacheSavingsUsd) : null;
+    document.getElementById('today-sum').textContent = `${t('lifetime')} ${fmtTokens(usage.totalTokens)}` + (savedStr ? ` · ${t('costSaved')} ${savedStr}` : '');
+    const ranks = usage.modelRank || [];
+    const tbody = document.getElementById('rank-body');
+    tbody.textContent = '';
+    if (!ranks.length) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 4;
+      td.style.color = 'var(--faint)';
+      td.style.textAlign = 'center';
+      td.textContent = t('noData');
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    } else {
+      for (const m of ranks) {
+        const tr = document.createElement('tr');
+        const tdModel = document.createElement('td');
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = String(m.model || '');
+        tdModel.appendChild(nameSpan);
+        if (showCost && m.pricing) {
+          const rateSpan = document.createElement('span');
+          rateSpan.className = 'rate-sub';
+          const approxPrefix = m.pricing.exact === false ? '~' : '';
+          const lcSuffix = m.pricing.longContextApplied ? ' (>200K)' : '';
+          rateSpan.textContent = `${approxPrefix}$${m.pricing.inputPer1M}/$${m.pricing.cacheReadPer1M}/$${m.pricing.outputPer1M}${lcSuffix}`;
+          rateSpan.title = `${m.pricing.exact === false ? t('approxRate') : t('pricingPer1M')} (${m.pricing.family || m.model})`;
+          tdModel.appendChild(rateSpan);
+        }
+        tr.appendChild(tdModel);
+
+        const tdTot = document.createElement('td');
+        tdTot.textContent = fmtTokens(m.totalTokens);
+        const mCostStr = showCost ? fmtUsd(m.costUsd) : null;
+        if (mCostStr) {
+          const cSpan = document.createElement('span');
+          cSpan.className = 'cost-sub';
+          cSpan.textContent = mCostStr;
+          const mPrecise = fmtUsdPrecise(m.costUsd);
+          if (mPrecise) cSpan.title = `${t('costLabel')}: ${mPrecise}`;
+          tdTot.appendChild(cSpan);
+        }
+        tr.appendChild(tdTot);
+
+        for (const cellText of [
+          fmtFixed(m.avgTps, 1) || '--',
+          String(safeInt(m.requests)),
+        ]) {
+          const td = document.createElement('td');
+          td.textContent = cellText;
+          tr.appendChild(td);
+        }
+        tbody.appendChild(tr);
+      }
+    }
+  }
+
   async function refresh() {
     if (document.hidden) return;
     const mySeq = ++reqSeq;
@@ -271,122 +454,15 @@
       const q = initialCid ? `?conversationId=${encodeURIComponent(initialCid)}` : '';
       const data = await apiGet('./api/snapshot' + q);
       if (mySeq !== reqSeq) return;
+      lastData = data;
 
-      if (data.version) document.getElementById('ver').textContent = 'v' + String(data.version);
-      if (data.preferences && safeInt(data.preferences.version) >= confirmedVersion) {
+      if (pendingPrefCount === 0 && data.preferences && safeInt(data.preferences.version) >= confirmedVersion) {
         prefs = data.preferences;
         confirmedVersion = safeInt(prefs.version);
         lang = prefs.language === 'en' ? 'en' : 'zh-CN';
       }
       applyStaticLabels();
-
-      const diag = data.integration || {};
-      const banner = document.getElementById('diag-banner');
-      const ok = diag.state === 'mounted' || diag.state === 'waiting_composer';
-      banner.className = 'banner ' + (ok ? 'ok' : 'warn');
-      banner.textContent = (ok ? '' : '⚠ ') + tDiag(diag.code || diag.state);
-
-      const c = data.conversation || {};
-      const heroSpeed = fmtFixed(c.latestTps, 1) || fmtFixed(c.tps, 1) || '--';
-      document.getElementById('k-latest').textContent = heroSpeed;
-      document.getElementById('k-session').textContent = fmtFixed(c.tps, 1) || '--';
-      document.getElementById('k-cache').textContent = fmtPct(c.cacheHitRate);
-      const ctxFrac = c.context ? c.context.usedFraction : null;
-      syncContextRing(document.getElementById('k-ctx-ring'), ctxFrac);
-      document.getElementById('k-ctx').textContent = c.context ? fmtPct(ctxFrac) : '--';
-      document.getElementById('model-name').textContent = c.model || (data.conversationUnavailable ? t('convUnavailable') : '');
-      document.getElementById('sparkline').innerHTML = renderSpark(c.sparkline);
-
-      const quotas = data.quotas || [];
-      document.getElementById('quotas').innerHTML = quotas.length
-        ? quotas.map((item) => {
-            if (item.fiveHour && item.weekly) {
-              const p5 = Math.round(Math.max(0, Math.min(1, Number(item.fiveHour.remainingFraction) || 0)) * 100);
-              const pw = Math.round(Math.max(0, Math.min(1, Number(item.weekly.remainingFraction) || 0)) * 100);
-              return `<div class="q-item"><div class="q-meta"><span class="q-name">${esc(item.title)}</span><span class="q-pair" title="${esc(t('quotaPairTip'))}">${p5}%<span class="q-slash">/</span>${pw}%</span></div>` +
-                renderSubBar(t('quotaTag5h'), item.fiveHour.remainingFraction, item.fiveHour.resetTime, item.fiveHour.pacing) +
-                renderSubBar(t('quotaTagWeek'), item.weekly.remainingFraction, item.weekly.resetTime, item.weekly.pacing) +
-              `</div>`;
-            }
-            let kind = item.windowKind === '5h' || item.windowKind === 'week' ? item.windowKind : null;
-            if (!kind && item.resetTime) {
-              const ms = Date.parse(item.resetTime) - Date.now();
-              if (Number.isFinite(ms) && ms > 0) kind = ms <= 5.5 * 3600000 ? '5h' : ms <= 8 * 86400000 ? 'week' : null;
-            }
-            const tag = kind ? (kind === '5h' ? t('quotaTag5h') : t('quotaTagWeek')) : '·';
-            return `<div class="q-item"><div class="q-meta"><span class="q-name">${esc(item.title)}</span></div>${renderSubBar(tag, item.remainingFraction, item.resetTime, item.pacing)}</div>`;
-          }).join('')
-        : `<div style="color:var(--faint);font-size:11.5px;">${esc(t('noData'))}</div>`;
-
-      const usage = data.usage || {};
-      document.getElementById('u-today').textContent = fmtTokens(usage.todayTokens);
-      document.getElementById('u-week').textContent = fmtTokens(usage.weekTokens);
-      document.getElementById('u-month').textContent = fmtTokens(usage.monthTokens);
-      document.getElementById('u-total').textContent = fmtTokens(usage.totalTokens);
-      const showCost = prefs.showCost === true;
-      const uMetaEl = document.getElementById('u-meta');
-      if (uMetaEl) {
-        const metaParts = [];
-        const totalCostStr = showCost ? fmtUsd(usage.totalCostUsd) : null;
-        if (totalCostStr) metaParts.push(totalCostStr);
-        if (safeInt(usage.monthRequests) > 0) metaParts.push(`${safeInt(usage.monthRequests).toLocaleString()} ${t('requests')}`);
-        if (safeInt(usage.activeDays) > 0) metaParts.push(`${safeInt(usage.activeDays)} ${t('activeDays')}`);
-        uMetaEl.textContent = metaParts.join(' · ');
-      }
-      const heatEl = document.getElementById('heatmap');
-      if (heatEl) heatEl.innerHTML = renderHeatmap(usage.days, usage.todayDate);
-      const savedStr = showCost ? fmtUsd(usage.lifetimeCacheSavingsUsd) : null;
-      document.getElementById('today-sum').textContent = `${t('lifetime')} ${fmtTokens(usage.totalTokens)}` + (savedStr ? ` · ${t('costSaved')} ${savedStr}` : '');
-      const ranks = usage.modelRank || [];
-      const tbody = document.getElementById('rank-body');
-      tbody.textContent = '';
-      if (!ranks.length) {
-        const tr = document.createElement('tr');
-        const td = document.createElement('td');
-        td.colSpan = 4;
-        td.style.color = 'var(--faint)';
-        td.style.textAlign = 'center';
-        td.textContent = t('noData');
-        tr.appendChild(td);
-        tbody.appendChild(tr);
-      } else {
-        for (const m of ranks) {
-          const tr = document.createElement('tr');
-          const tdModel = document.createElement('td');
-          const nameSpan = document.createElement('span');
-          nameSpan.textContent = String(m.model || '');
-          tdModel.appendChild(nameSpan);
-          if (showCost && m.pricing) {
-            const rateSpan = document.createElement('span');
-            rateSpan.className = 'rate-sub';
-            rateSpan.textContent = `$${m.pricing.inputPer1M}/$${m.pricing.cacheReadPer1M}/$${m.pricing.outputPer1M}`;
-            tdModel.appendChild(rateSpan);
-          }
-          tr.appendChild(tdModel);
-
-          const tdTot = document.createElement('td');
-          tdTot.textContent = fmtTokens(m.totalTokens);
-          const mCostStr = showCost ? fmtUsd(m.costUsd) : null;
-          if (mCostStr) {
-            const cSpan = document.createElement('span');
-            cSpan.className = 'cost-sub';
-            cSpan.textContent = mCostStr;
-            tdTot.appendChild(cSpan);
-          }
-          tr.appendChild(tdTot);
-
-          for (const cellText of [
-            fmtFixed(m.avgTps, 1) || '--',
-            String(safeInt(m.requests)),
-          ]) {
-            const td = document.createElement('td');
-            td.textContent = cellText;
-            tr.appendChild(td);
-          }
-          tbody.appendChild(tr);
-        }
-      }
-
+      renderSnapshot(data);
       renderToggles();
     } catch {
       if (mySeq !== reqSeq) return;
@@ -397,16 +473,8 @@
   }
 
   document.getElementById('refresh-btn').onclick = () => void refresh();
-  document.getElementById('lang-btn').onclick = async () => {
-    try {
-      const next = await apiPost('./api/preferences', { language: lang === 'en' ? 'zh-CN' : 'en' });
-      if (next && !next.error) {
-        prefs = next;
-        confirmedVersion = Math.max(confirmedVersion, safeInt(next.version));
-        lang = prefs.language;
-        void refresh();
-      }
-    } catch {}
+  document.getElementById('lang-btn').onclick = () => {
+    void updatePrefsOptimistic({ language: lang === 'en' ? 'zh-CN' : 'en' });
   };
 
   applyStaticLabels();

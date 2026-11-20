@@ -64,8 +64,14 @@ try {
 }
 
 if ($guiProcs.Count -gt 0) {
-    Write-Host '[提示] 检测到 Antigravity 主界面仍在运行（可能驻留在右下角系统托盘中）。' -ForegroundColor Yellow
-    Write-Host '请先右键系统托盘 Antigravity 图标点击【退出】，再双击本启动器以启用 --remote-debugging-port=0。' -ForegroundColor Yellow
+    $hasDebugFlag = @($guiProcs | Where-Object { $_.CommandLine -and $_.CommandLine -match '(?:^|\s)--remote-debugging-port=\d+' }).Count -gt 0
+    if ($hasDebugFlag) {
+        Write-Host '[提示] 检测到 Antigravity 已携带 --remote-debugging-port 调试参数在运行中，无需重复启动。' -ForegroundColor Green
+        Write-Host '如未看到底部内嵌状态条，可双击「一键诊断内嵌状态(Windows).bat」检查挂载状态。' -ForegroundColor Cyan
+    } else {
+        Write-Host '[提示] 检测到 Antigravity 主界面仍在运行（可能驻留在右下角系统托盘中，且未开启调试端口）。' -ForegroundColor Yellow
+        Write-Host '请先右键系统托盘 Antigravity 图标点击【退出】，再双击本启动器以启用 --remote-debugging-port=0。' -ForegroundColor Yellow
+    }
     if (-not $NonInteractive) { Read-Host '按回车键退出' }
     exit 5
 }

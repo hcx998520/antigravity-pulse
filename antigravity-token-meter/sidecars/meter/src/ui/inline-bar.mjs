@@ -17,6 +17,7 @@ export function buildInlineWidgetScript() {
     if (window.__agTokenMeterMounted) return;
 
     var HOST_ID = 'ag-token-meter-host';
+    var POPOVER_ID = 'ag-token-meter-pop-host';
     var MODAL_ID = 'ag-token-meter-modal-host';
     var EXACT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     var THEMES = ['swiss', 'glass', 'mono'];
@@ -52,6 +53,8 @@ export function buildInlineWidgetScript() {
 
     var hostEl = null;
     var shadow = null;
+    var popoverHost = null;
+    var popoverShadow = null;
     var modalHost = null;
     var modalShadow = null;
     var observer = null;
@@ -72,7 +75,7 @@ export function buildInlineWidgetScript() {
      * 优先以服务端返回的本地日期键（YYYY-MM-DD）作为图表日历基准，避免跨零点前后端 1 秒差导致双柱亮蓝或错位。
      */
     function parseBaseDate(todayDate) {
-      if (typeof todayDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(todayDate)) {
+      if (typeof todayDate === 'string' && /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(todayDate)) {
         var parts = todayDate.split('-').map(Number);
         var d = new Date(parts[0], parts[1] - 1, parts[2], 12, 0, 0, 0);
         if (Number.isFinite(d.getTime())) return d;
@@ -157,7 +160,30 @@ export function buildInlineWidgetScript() {
       return '~$' + v.toFixed(2);
     }
 
-    function getQuotaPairParts(pair, fallbackQuota) {
+    function fmtUsdPrecise(usd) {
+      var v = Number(usd);
+      if (!Number.isFinite(v) || v <= 0) return null;
+      if (v < 0.0001) return '<$0.0001';
+      if (v < 0.01) return '~$' + v.toFixed(4).replace(/0+$/, '').replace(/\\.$/, '');
+      if (v >= 1000) return '~$' + v.toFixed(2);
+      return '~$' + v.toFixed(4).replace(/00$/, '').replace(/(\\.[0-9][0-9])0$/, '$1');
+    }
+
+    function buildRateTooltip(pricing, usd) {
+      var parts = [t('costLabel')];
+      var precise = fmtUsdPrecise(usd);
+      if (precise) parts.push(precise);
+      if (pricing && pricing.inputPer1M != null) {
+        var approx = pricing.exact === false ? '~' : '';
+        var lcTag = pricing.longContextApplied ? ' (>200K)' : '';
+        parts.push(approx + '$' + pricing.inputPer1M + '/$' + pricing.cacheReadPer1M + '/$' + pricing.outputPer1M + ' ' + t('rateUnit') + lcTag);
+        if (pricing.exact === false) parts.push(t('approxRate'));
+      }
+      return parts.join(' · ');
+    }
+
+    function getQuotaPairParts(pair, fallbackQuota, withPercent) {
+      var fmt = withPercent === false ? fmtPctNum : fmtPct;
       var p = pair;
       if (!p && fallbackQuota) {
         var kind = resolveQuotaKind(fallbackQuota);
@@ -172,11 +198,11 @@ export function buildInlineWidgetScript() {
       var hasWk = typeof p.weeklyFraction === 'number' && Number.isFinite(p.weeklyFraction);
       if (has5h || hasWk) {
         return {
-          left: fmtPct(has5h ? p.fiveHourFraction : null),
-          right: fmtPct(hasWk ? p.weeklyFraction : null),
+          left: fmt(has5h ? p.fiveHourFraction : null),
+          right: fmt(hasWk ? p.weeklyFraction : null),
         };
       }
-      return { single: fmtPct(p.fallbackFraction) };
+      return { single: fmt(p.fallbackFraction) };
     }
 
     function fmtCountdown(iso) {
@@ -220,6 +246,10 @@ export function buildInlineWidgetScript() {
       if (qText !== '--') parts.push('Quota ' + qText);
       if (usage.todayTokens) parts.push('Today ' + fmtTokens(usage.todayTokens));
       if (usage.monthTokens) parts.push('Month ' + fmtTokens(usage.monthTokens));
+      if (state.prefs && state.prefs.showCost === true) {
+        var cUsd = fmtUsd(conv.costUsd) || fmtUsd(usage.todayCostUsd);
+        if (cUsd) parts.push('Cost ' + cUsd);
+      }
       return parts.join(' | ');
     }
 
@@ -390,41 +420,45 @@ export function buildInlineWidgetScript() {
 
     /**
      * 四级渐进自适应布局计算：按底栏剩余真实宽度决定 full / compact / tight(+N) / mini。
+     * 排第一位的可见 chip 恒带一颗四角星图标（leadStar），将其宽度与单项纯内容宽度解耦计算，
+     * 确保用户隐藏任意前置指标（如关闭 showSpeed）或出现 7 字符大额数值（如 892.34M / 100%）时依然零挤压、零掉行。
      */
     function computeBarLayout(enabledTabs, freeWidth) {
       if (!enabledTabs.length) return { density: 'full', shown: [], hidden: [] };
       var isEn = state.prefs && state.prefs.language === 'en';
+      var leadStarFull = 19;    // 14px 星标 + 5px 间距
+      var leadStarCompact = 17; // 13px 星标 + 4px 间距
       var fullW = isEn
-        ? { speed: 92, cache: 98, context: 96, quota: 106, today: 94, month: 92 }
-        : { speed: 88, cache: 86, context: 86, quota: 94, today: 88, month: 78 };
+        ? { speed: 80, cache: 102, context: 100, quota: 94, today: 100, month: 100 }
+        : { speed: 80, cache: 96, context: 98, quota: 84, today: 94, month: 92 };
       var compactW = isEn
-        ? { speed: 58, cache: 66, context: 48, quota: 72, today: 68, month: 62 }
-        : { speed: 56, cache: 56, context: 48, quota: 72, today: 58, month: 54 };
+        ? { speed: 42, cache: 68, context: 52, quota: 60, today: 74, month: 70 }
+        : { speed: 42, cache: 60, context: 52, quota: 60, today: 70, month: 70 };
       var sepW = 5;
 
-      var totalFull = enabledTabs.reduce(function(acc, k) { return acc + (fullW[k] || 76); }, 0) + Math.max(0, enabledTabs.length - 1) * sepW;
+      var totalFull = leadStarFull + enabledTabs.reduce(function(acc, k) { return acc + (fullW[k] || 84); }, 0) + Math.max(0, enabledTabs.length - 1) * sepW;
       if (freeWidth >= totalFull) {
         return { density: 'full', shown: enabledTabs.slice(), hidden: [] };
       }
 
-      var totalCompact = enabledTabs.reduce(function(acc, k) { return acc + (compactW[k] || 54); }, 0) + Math.max(0, enabledTabs.length - 1) * sepW;
+      var totalCompact = leadStarCompact + enabledTabs.reduce(function(acc, k) { return acc + (compactW[k] || 60); }, 0) + Math.max(0, enabledTabs.length - 1) * sepW;
       if (freeWidth >= totalCompact) {
         return { density: 'compact', shown: enabledTabs.slice(), hidden: [] };
       }
 
-      if (freeWidth < 102) {
+      if (freeWidth < 96) {
         return { density: 'mini', shown: [], hidden: enabledTabs.slice() };
       }
 
-      // tight 档：按核心优先级尽量保留能放下的格子，其余收纳进末尾 +N 胶囊
+      // tight 档：按核心优先级尽量保留能放下的格子（首项计入 leadStarCompact，后续项计入 sepW），其余收纳进末尾 +N 胶囊
       var priority = ['speed', 'context', 'quota', 'month', 'cache', 'today'];
-      var budget = freeWidth - 36; // 预留给 "+N" 溢出胶囊
+      var budget = freeWidth - 38; // 预留给分隔符与 "+N" 溢出胶囊
       var picked = Object.create(null);
       var used = 0;
       for (var i = 0; i < priority.length; i++) {
         var key = priority[i];
         if (enabledTabs.indexOf(key) < 0) continue;
-        var need = (compactW[key] || 54) + (used > 0 ? sepW : 0);
+        var need = (compactW[key] || 60) + (used === 0 ? leadStarCompact : sepW);
         if (used + need <= budget) {
           picked[key] = true;
           used += need;
@@ -452,8 +486,8 @@ export function buildInlineWidgetScript() {
               '<stop offset="100%" stop-color="var(--tm-gem-c)"/>' +
             '</linearGradient>' +
           '</defs>' +
-          '<path class="tm-star-main" d="M10.2 3.2 C11.3 9.4 13.4 11.5 19.6 12.6 C13.4 13.7 11.3 15.8 10.2 22 C9.1 15.8 7 13.7 0.8 12.6 C7 11.5 9.1 9.4 10.2 3.2 Z"/>' +
-          '<path class="tm-star-sub" d="M19.4 2.4 C19.9 4.5 20.6 5.2 22.7 5.7 C20.6 6.2 19.9 6.9 19.4 9 C18.9 6.9 18.2 6.2 16.1 5.7 C18.2 5.2 18.9 4.5 19.4 2.4 Z"/>' +
+          '<path class="tm-star-main" d="M10.4 3 C11.5 9.0 13.4 10.9 19.4 12 C13.4 13.1 11.5 15.0 10.4 21 C9.3 15.0 7.4 13.1 1.4 12 C7.4 10.9 9.3 9.0 10.4 3 Z"/>' +
+          '<path class="tm-star-sub" d="M19.4 2.0 C19.85 3.95 20.45 4.55 22.4 5.0 C20.45 5.45 19.85 6.05 19.4 8.0 C18.95 6.05 18.35 5.45 16.4 5.0 C18.35 4.55 18.95 3.95 19.4 2.0 Z"/>' +
         '</svg>';
       }
       return '<svg class="tm-star ' + cls + '" viewBox="0 0 24 24" aria-hidden="true">' +
@@ -464,7 +498,7 @@ export function buildInlineWidgetScript() {
             '<stop offset="100%" stop-color="var(--tm-gem-c)"/>' +
           '</linearGradient>' +
         '</defs>' +
-        '<path class="tm-star-main" d="M12 1.2 C13.2 8.2 15.8 10.8 22.8 12 C15.8 13.2 13.2 15.8 12 22.8 C10.8 15.8 8.2 13.2 1.2 12 C8.2 10.8 10.8 8.2 12 1.2 Z"/>' +
+        '<path class="tm-star-main" d="M12 1.6 C13.15 8.35 15.65 10.85 22.4 12 C15.65 13.15 13.15 15.65 12 22.4 C10.85 15.65 8.35 13.15 1.6 12 C8.35 10.85 10.85 8.35 12 1.6 Z"/>' +
       '</svg>';
     }
 
@@ -529,11 +563,32 @@ export function buildInlineWidgetScript() {
       }
     }
 
-    function buildSparklineSvg(points) {
-      if (!Array.isArray(points) || points.length < 2) {
-        return { html: '<div class="tm-empty">' + escapeHtml(t('noData')) + '</div>', meta: null };
+    function buildSparklineSvg(points, hasConv) {
+      if (!Array.isArray(points) || points.length === 0) {
+        var emptyMsg = hasConv ? t('noData') : t('newChatHint');
+        return { html: '<div class="tm-empty">' + escapeHtml(emptyMsg) + '</div>', meta: null };
       }
       var w = 276, h = 48, padX = 6, padY = 8;
+      var midY = (h / 2).toFixed(1);
+      if (points.length === 1) {
+        var p0 = points[0] || {};
+        var v0 = Number(p0.tps);
+        var tps0 = Number.isFinite(v0) && v0 >= 0 ? v0 : 0;
+        var cx0 = w / 2, cy0 = h / 2;
+        var singleItem = [{ idx: 1, tps: tps0, ttft: p0.ttft != null ? p0.ttft : null, tokens: safeInt(p0.tokens), x: cx0, y: cy0 }];
+        return {
+          html: '<svg class="tm-spark tm-chart-interactive" id="tm-spark-svg" viewBox="0 0 ' + w + ' ' + h + '" width="100%" height="' + h + '">' +
+            '<line x1="0" y1="' + midY + '" x2="' + w + '" y2="' + midY + '" stroke="var(--tm-hairline)" stroke-dasharray="2 3"/>' +
+            '<circle cx="' + cx0.toFixed(1) + '" cy="' + cy0.toFixed(1) + '" r="5.4" fill="var(--tm-accent)" fill-opacity="0.16" pointer-events="none"/>' +
+            '<circle id="tm-sp-last" cx="' + cx0.toFixed(1) + '" cy="' + cy0.toFixed(1) + '" r="3" fill="var(--tm-accent)" stroke="var(--tm-card)" stroke-width="1.5" pointer-events="none"/>' +
+            '<line id="tm-sp-xhair" x1="0" y1="2" x2="0" y2="' + (h - 2) + '" class="tm-sp-xhair" style="display:none"/>' +
+            '<circle id="tm-sp-halo" cx="0" cy="0" r="6.5" fill="var(--tm-accent)" fill-opacity="0.22" pointer-events="none" style="display:none"/>' +
+            '<circle id="tm-sp-dot" cx="0" cy="0" r="3.4" fill="var(--tm-card)" stroke="var(--tm-accent)" stroke-width="2.1" pointer-events="none" style="display:none"/>' +
+            '<rect x="0" y="0" width="' + w + '" height="' + h + '" fill="transparent"/>' +
+          '</svg>',
+          meta: { kind: 'spark', w: w, padX: padX, items: singleItem },
+        };
+      }
       var vals = points.map(function(p) { var v = Number(p && p.tps); return Number.isFinite(v) && v >= 0 ? v : 0; });
       var min = Math.min.apply(null, vals);
       var max = Math.max.apply(null, vals);
@@ -547,7 +602,6 @@ export function buildInlineWidgetScript() {
       var coords = pts.map(function(p) { return p[0].toFixed(1) + ',' + p[1].toFixed(1); });
       var area = padX + ',' + (h - 2) + ' ' + coords.join(' ') + ' ' + (w - padX) + ',' + (h - 2);
       var last = pts[pts.length - 1];
-      var midY = (h / 2).toFixed(1);
       var items = points.map(function(p, idx) {
         return {
           idx: idx + 1,
@@ -583,9 +637,9 @@ export function buildInlineWidgetScript() {
       };
     }
 
-    function buildTokenBreakdownHtml(conv) {
+    function buildTokenBreakdownHtml(conv, showCost) {
       var tokens = conv && conv.tokens;
-      var uIn = safeInt(tokens && tokens.uncachedInput);
+      var uIn = safeInt(tokens && tokens.uncachedInput) + safeInt(tokens && tokens.cacheWrite);
       var cRead = safeInt(tokens && tokens.cacheRead);
       var rOut = safeInt(tokens && tokens.responseOutput);
       var tOut = safeInt(tokens && tokens.thinkingOutput);
@@ -596,11 +650,14 @@ export function buildInlineWidgetScript() {
       var wThink = sum > 0 ? (tOut / sum) * 100 : 0;
       var fresh = getCacheFreshness(conv && conv.lastRequestTime);
       var thinkPct = conv && typeof conv.thinkingRatio === 'number' ? Math.round(conv.thinkingRatio * 100) + '%' : null;
+      var savedUsd = showCost && conv && conv.cacheSavingsUsd > 0 ? fmtUsd(conv.cacheSavingsUsd) : null;
+      var savedPrecise = showCost && conv && conv.cacheSavingsUsd > 0 ? fmtUsdPrecise(conv.cacheSavingsUsd) : null;
 
       var metaLine = '';
-      if (fresh || thinkPct || cRead > 0) {
+      if (fresh || thinkPct || cRead > 0 || savedUsd) {
+        var savedTag = savedUsd ? ' · <b class="tm-cost-val" title="' + escapeHtml(t('costSaved') + ': ' + (savedPrecise || savedUsd)) + '">' + escapeHtml(t('costSaved') + ' ' + savedUsd) + '</b>' : '';
         metaLine = '<div class="tm-micro-row">' +
-          (fresh ? '<span class="tm-fresh ' + fresh.cls + '"><i></i>' + escapeHtml(fresh.label) + (cRead > 0 ? ' · ' + escapeHtml(t('cacheSaved')) + ' ' + escapeHtml(fmtTokens(cRead)) : '') + '</span>' : '<span></span>') +
+          (fresh ? '<span class="tm-fresh ' + fresh.cls + '"><i></i>' + escapeHtml(fresh.label) + (cRead > 0 ? ' · ' + escapeHtml(t('cacheSaved')) + ' ' + escapeHtml(fmtTokens(cRead)) : '') + savedTag + '</span>' : (savedTag ? '<span class="tm-fresh">' + savedTag.slice(3) + '</span>' : '<span></span>')) +
           (thinkPct ? '<span class="tm-think-tag">' + escapeHtml(t('thinkShare')) + ' ' + escapeHtml(thinkPct) + '</span>' : '') +
         '</div>';
       }
@@ -641,7 +698,7 @@ export function buildInlineWidgetScript() {
       var dayMap = Object.create(null);
       (days || []).forEach(function(d) {
         if (d && d.date) {
-          dayMap[d.date] = { total: safeInt(d.total), requests: safeInt(d.requests) };
+          dayMap[d.date] = { total: safeInt(d.total), requests: safeInt(d.requests), costUsd: Number(d.costUsd) || 0 };
         }
       });
       var now = parseBaseDate(todayDate);
@@ -654,8 +711,9 @@ export function buildInlineWidgetScript() {
         var rec = dayMap[key];
         var v = rec ? rec.total : 0;
         var reqs = rec ? rec.requests : 0;
+        var cUsd = rec ? rec.costUsd : 0;
         if (v > maxVal) maxVal = v;
-        bars.push({ key: key, val: v, reqs: reqs, isToday: todayDate ? key === todayDate : i === 0 });
+        bars.push({ key: key, val: v, reqs: reqs, costUsd: cUsd, isToday: todayDate ? key === todayDate : i === 0 });
       }
       var w = 278, h = 44, slot = w / bars.length, bw = Math.max(8, slot - 5);
       var metaItems = [];
@@ -670,6 +728,7 @@ export function buildInlineWidgetScript() {
           key: b.key,
           val: b.val,
           reqs: b.reqs,
+          costUsd: b.costUsd,
           isToday: b.isToday,
           cx: idx * slot + slot / 2,
           topY: y,
@@ -716,12 +775,10 @@ export function buildInlineWidgetScript() {
         var sessionSpeedText = fmtFixed(conv && conv.tps, 1) || '--';
         var ttftFixed = fmtFixed(conv && conv.ttftSeconds, 2);
         var ttftText = ttftFixed !== null ? ttftFixed + 's' : '--';
-        var sparkRes = buildSparklineSvg(conv && conv.sparkline);
+        var sparkRes = buildSparklineSvg(conv && conv.sparkline, Boolean(conv));
         var showCost = Boolean(state.prefs && state.prefs.showCost === true);
         var costStr = showCost && conv && conv.costUsd > 0 ? fmtUsd(conv.costUsd) : null;
-        var rateTip = conv && conv.pricing
-          ? (t('costLabel') + ' · $' + conv.pricing.inputPer1M + '/$' + conv.pricing.cacheReadPer1M + '/$' + conv.pricing.outputPer1M + ' ' + t('rateUnit'))
-          : t('costLabel');
+        var rateTip = buildRateTooltip(conv && conv.pricing, conv && conv.costUsd);
         return {
           title: t('cardSpeed'),
           badge: isRunning ? t('generating') : '',
@@ -746,6 +803,7 @@ export function buildInlineWidgetScript() {
         var tokens = conv && conv.tokens;
         var inAll = safeInt(tokens && tokens.inputAll);
         var outAll = safeInt(tokens && tokens.output);
+        var showCostCache = Boolean(state.prefs && state.prefs.showCost === true);
         return {
           title: t('cardCache'),
           badge: '',
@@ -755,14 +813,13 @@ export function buildInlineWidgetScript() {
               '<div class="tm-hero-main"><span class="tm-hero-num">' + escapeHtml(fmtPct(cacheVal)) + '</span><span class="tm-hero-unit">' + escapeHtml(t('cacheHit')) + '</span></div>' +
               '<div class="tm-hero-meta">' + escapeHtml(t('totalInput')) + ' <b>' + escapeHtml(fmtTokens(inAll)) + '</b><br/>' + escapeHtml(t('totalOutput')) + ' <b>' + escapeHtml(fmtTokens(outAll)) + '</b></div>' +
             '</div>' +
-            (conv ? ('<div class="tm-sec tm-sec-flush">' + buildTokenBreakdownHtml(conv) + '</div>') : ('<div class="tm-empty">' + escapeHtml(t('noData')) + '</div>')),
+            (conv ? ('<div class="tm-sec tm-sec-flush">' + buildTokenBreakdownHtml(conv, showCostCache) + '</div>') : ('<div class="tm-empty">' + escapeHtml(t('newChatHint')) + '</div>')),
         };
       }
 
       if (tab === 'context') {
         var ctx = conv && conv.context;
         var ctxFrac = ctx ? ctx.usedFraction : null;
-        var ctxPct = typeof ctxFrac === 'number' && Number.isFinite(ctxFrac) ? Math.round(Math.max(0, Math.min(1, ctxFrac)) * 100) : 0;
         var isEnCtx = state.prefs && state.prefs.language === 'en';
         var turnsText = ctx && typeof ctx.estimatedTurnsLeft === 'number' && Number.isFinite(ctx.estimatedTurnsLeft)
           ? (isEnCtx ? (t('turnsLeft') + ctx.estimatedTurnsLeft + ' ' + t('turnsUnit')) : (t('turnsLeft') + ' ' + ctx.estimatedTurnsLeft + ' ' + t('turnsUnit')))
@@ -785,7 +842,7 @@ export function buildInlineWidgetScript() {
               '<div class="tm-sub-cell"><div class="tm-sub-k">' + escapeHtml(t('windowCap')) + '</div><div class="tm-sub-v">' + escapeHtml(fmtTokens(ctx.maxTokens)) + '</div></div>' +
             '</div>' +
             '<div class="tm-ctx-note ' + ctxTone + '">' + escapeHtml(ctxNoteText) + '</div>'
-          ) : ('<div class="tm-empty">' + escapeHtml(t('noData')) + '</div>'),
+          ) : ('<div class="tm-empty">' + escapeHtml(conv ? t('noData') : t('newChatHint')) + '</div>'),
         };
       }
 
@@ -823,21 +880,37 @@ export function buildInlineWidgetScript() {
         var tTotal = safeInt(u.todayTokens);
         var mTotal = safeInt(u.monthTokens);
         var shareText = mTotal > 0 ? Math.min(100, Math.round((tTotal / mTotal) * 100)) + '%' : '--';
+        var showCostToday = Boolean(state.prefs && state.prefs.showCost === true);
+        var todayDayCostMap = Object.create(null);
+        if (u.todayDate && Array.isArray(u.days)) {
+          for (var tdi = u.days.length - 1; tdi >= 0; tdi--) {
+            var tdRec = u.days[tdi];
+            if (tdRec && tdRec.date === u.todayDate && tdRec.byModelCost && typeof tdRec.byModelCost === 'object') {
+              todayDayCostMap = tdRec.byModelCost;
+              break;
+            }
+          }
+        }
         var modelsAll = Array.isArray(u.todayByModel) ? u.todayByModel : [];
-        var models = modelsAll.slice(0, 4).map(function(m) { return { model: m.model, totalTokens: safeInt(m.totalTokens) }; });
+        var models = modelsAll.slice(0, 4).map(function(m) {
+          var rawCost = m && m.costUsd != null ? Number(m.costUsd) : (Object.hasOwn(todayDayCostMap, m.model) ? Number(todayDayCostMap[m.model]) : 0);
+          return { model: m.model, totalTokens: safeInt(m.totalTokens), costUsd: Number.isFinite(rawCost) && rawCost > 0 ? rawCost : 0 };
+        });
         var shownSum = models.reduce(function(acc, m) { return acc + m.totalTokens; }, 0);
+        var shownCostSum = models.reduce(function(acc, m) { return acc + m.costUsd; }, 0);
         if (tTotal > shownSum && models.length > 0) {
-          models.push({ model: t('otherModels'), totalTokens: tTotal - shownSum });
+          var remCost = Math.max(0, (Number(u.todayCostUsd) || 0) - shownCostSum);
+          models.push({ model: t('otherModels'), totalTokens: tTotal - shownSum, costUsd: remCost });
         }
         var topMax = models.length ? Math.max(1, models[0].totalTokens) : 1;
         var modelBars = models.map(function(m) {
           var pct = Math.max(3, Math.round((safeInt(m.totalTokens) / topMax) * 100));
+          var mCostStr = showCostToday && m.costUsd > 0 ? fmtUsd(m.costUsd) : null;
           return '<div class="tm-mbar-row">' +
-            '<div class="tm-mbar-meta"><span class="tm-mbar-name" title="' + escapeHtml(m.model) + '">' + escapeHtml(m.model) + '</span><span class="tm-mbar-val">' + escapeHtml(fmtTokens(m.totalTokens)) + '</span></div>' +
+            '<div class="tm-mbar-meta"><span class="tm-mbar-name" title="' + escapeHtml(m.model) + '">' + escapeHtml(m.model) + '</span><span class="tm-mbar-val">' + escapeHtml(fmtTokens(m.totalTokens)) + (mCostStr ? ' · <span class="tm-cost-val">' + escapeHtml(mCostStr) + '</span>' : '') + '</span></div>' +
             '<div class="tm-mbar-track"><div class="tm-mbar-fill" style="width:' + pct + '%"></div></div>' +
           '</div>';
         }).join('');
-        var showCostToday = Boolean(state.prefs && state.prefs.showCost === true);
         var todayUsd = showCostToday && u.todayCostUsd > 0 ? fmtUsd(u.todayCostUsd) : null;
         return {
           title: t('cardToday'),
@@ -862,6 +935,9 @@ export function buildInlineWidgetScript() {
         var trendRes = buildDailyTrendSvg(um.days, um.todayDate);
         var showCostMonth = Boolean(state.prefs && state.prefs.showCost === true);
         var monthUsd = showCostMonth && um.monthCostUsd > 0 ? fmtUsd(um.monthCostUsd) : null;
+        var monthTip = showCostMonth && um.monthCostUsd > 0
+          ? (t('costLabel') + ' · ' + (fmtUsdPrecise(um.monthCostUsd) || monthUsd) + (um.monthCacheSavingsUsd > 0 ? ' · ' + t('costSaved') + ' ' + fmtUsd(um.monthCacheSavingsUsd) : ''))
+          : t('costLabel');
         var totalUsd = showCostMonth && um.totalCostUsd > 0 ? fmtUsd(um.totalCostUsd) : null;
         return {
           title: t('cardMonth'),
@@ -871,7 +947,7 @@ export function buildInlineWidgetScript() {
           body:
             '<div class="tm-hero">' +
               '<div class="tm-hero-main"><span class="tm-hero-num">' + escapeHtml(fmtTokens(um.monthTokens)) + '</span><span class="tm-hero-unit">tokens</span></div>' +
-              '<div class="tm-hero-meta"><b>' + safeInt(um.monthRequests).toLocaleString() + '</b> ' + escapeHtml(t('requests')) + '<br/>' + (monthUsd ? ('<b class="tm-cost-val" title="' + escapeHtml(t('costLabel')) + '">' + escapeHtml(monthUsd) + '</b>') : (escapeHtml(t('lifetime')) + ' <b>' + escapeHtml(fmtTokens(um.totalTokens)) + '</b>')) + '</div>' +
+              '<div class="tm-hero-meta"><b>' + safeInt(um.monthRequests).toLocaleString() + '</b> ' + escapeHtml(t('requests')) + '<br/>' + (monthUsd ? ('<b class="tm-cost-val" title="' + escapeHtml(monthTip) + '">' + escapeHtml(monthUsd) + '</b>') : (escapeHtml(t('lifetime')) + ' <b>' + escapeHtml(fmtTokens(um.totalTokens)) + '</b>')) + '</div>' +
             '</div>' +
             '<div class="tm-sec-title" style="margin-bottom:4px;"><span>' + escapeHtml(t('dailyTrend')) + '</span><span class="tm-chart-readout" id="tm-trend-readout"></span></div>' +
             '<div class="tm-trend-wrap">' + trendRes.html + '<div class="tm-mini-tip" id="tm-trend-tip" aria-hidden="true"></div></div>' +
@@ -968,13 +1044,16 @@ export function buildInlineWidgetScript() {
           --tm-radius: 11px;
           --tm-blur: none;
           --tm-shadow: 0 18px 44px -12px rgba(24,24,27,0.16), 0 2px 6px rgba(24,24,27,0.06);
-          --tm-mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", "Consolas", monospace;
-          --tm-font: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-          font-family: var(--tm-font);
-          font-size: 11.5px;
+          --tm-sans: "Google Sans Flex", "Google Sans", -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "Inter", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", "Source Han Sans SC", "Noto Sans CJK SC", "WenQuanYi Micro Hei", sans-serif;
+          --tm-mono: ui-monospace, "SF Mono", "SFMono-Regular", "Cascadia Mono", "JetBrains Mono", "Consolas", "Liberation Mono", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", "Source Han Sans SC", "Noto Sans CJK SC", "WenQuanYi Micro Hei", monospace;
+          --tm-num: var(--tm-sans);
+          --tm-font: var(--tm-sans);
+          font-family: var(--tm-sans);
+          font-size: 12px;
+          line-height: 1.45;
           color: var(--tm-text);
           display: block;
-          -webkit-font-smoothing: antialiased;
+          font-kerning: normal;
         }
         :host([data-theme="dark"]) {
           --tm-card: #121214;
@@ -1017,8 +1096,9 @@ export function buildInlineWidgetScript() {
           --tm-hairline: rgba(255,255,255,0.08);
           --tm-shadow: 0 24px 56px -12px rgba(0,0,0,0.62), inset 0 1px 0 rgba(255,255,255,0.12);
         }
-        /* 主题 3：极客终端 Mono（数字等宽精密仪器 + 经典翠绿磷光点缀，正文保留无衬线防中文退化宋体及排版跳动） */
+        /* 主题 3：极客终端 Mono（仅 Mono 主题启用等宽数字栈，同时保留完整 CJK 回退防退化新宋体） */
         :host([data-style="mono"]) {
+          --tm-num: var(--tm-mono);
           --tm-cost: #059669;
           --tm-card: #f6f8f6;
           --tm-elev: #e9eee9;
@@ -1077,35 +1157,46 @@ export function buildInlineWidgetScript() {
         }
         :host([data-placement="inline-footer"]) .tm-chips {
           flex-wrap: nowrap;
+          white-space: nowrap;
         }
         :host([data-density="compact"]) .tm-chip,
         :host([data-density="tight"]) .tm-chip {
-          padding: 2px 4px;
+          padding: 0 4px;
           gap: 3.5px;
           font-size: 11px;
         }
+        :host([data-density="compact"]) .tm-chip-txt,
+        :host([data-density="tight"]) .tm-chip-txt {
+          gap: 3px;
+          line-height: 15px;
+        }
         :host([data-density="compact"]) .tm-label,
         :host([data-density="tight"]) .tm-label {
-          font-size: 10.5px;
+          font-size: 11px;
+        }
+        :host([data-density="compact"]) .tm-val,
+        :host([data-density="tight"]) .tm-val {
+          font-size: 11.5px;
         }
         :host([data-density="compact"]) .tm-sep,
         :host([data-density="tight"]) .tm-sep {
           margin: 0 1px;
         }
-        .tm-chip-more { font-family: var(--tm-mono); font-size: 10.5px; color: var(--tm-sub); background: var(--tm-hover); padding: 1px 5px !important; }
+        .tm-chip-more { font-family: var(--tm-num); font-size: 11px; font-variant-numeric: tabular-nums; color: var(--tm-sub); background: var(--tm-hover); padding: 1px 5px !important; }
         .tm-more-list { display: flex; flex-direction: column; gap: 2px; }
-        .tm-more-row { display: flex; justify-content: space-between; align-items: baseline; padding: 6px 2px; border-bottom: 1px solid var(--tm-hairline); font-size: 11.5px; }
+        .tm-more-row { display: flex; justify-content: space-between; align-items: baseline; padding: 6px 2px; border-bottom: 1px solid var(--tm-hairline); font-size: 11.5px; line-height: 1.35; }
         .tm-more-row:last-child { border-bottom: none; padding-bottom: 2px; }
-        .tm-more-k { color: var(--tm-muted); }
-        .tm-more-v { font-family: var(--tm-mono); font-weight: 600; color: var(--tm-text); font-variant-numeric: tabular-nums; }
+        .tm-more-k { color: var(--tm-sub); font-weight: 500; }
+        .tm-more-v { font-family: var(--tm-num); font-weight: 600; color: var(--tm-text); font-variant-numeric: tabular-nums; }
         .tm-chips { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 1px; }
-        .tm-chip { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 6px; border-radius: 5px; background: transparent; border: none; color: var(--tm-muted); cursor: pointer; transition: background .14s ease, color .14s ease; line-height: 1; font-size: 11.5px; font-variant-numeric: tabular-nums; font-family: inherit; }
+        .tm-chip { display: inline-flex; align-items: center; gap: 4.5px; height: 22px; padding: 0 6px; border-radius: 5px; background: transparent; border: none; color: var(--tm-sub); cursor: pointer; transition: background .14s ease, color .14s ease; line-height: 16px; font-size: 12px; font-variant-numeric: tabular-nums; font-family: inherit; white-space: nowrap; flex-shrink: 0; }
+        .tm-chip-txt { display: inline-flex; align-items: baseline; gap: 4px; line-height: 16px; }
         .tm-chip:hover, .tm-chip:focus-visible, .tm-chip.active { background: var(--tm-hover); color: var(--tm-text); outline: none; }
         .tm-sep { width: 1px; height: 9px; background: var(--tm-sep); margin: 0 2px; display: inline-block; flex-shrink: 0; pointer-events: none; }
-        .tm-star { width: 15px; height: 15px; display: block; flex-shrink: 0; filter: drop-shadow(0 0 2.5px var(--tm-gem-glow)); transition: transform .22s ease, filter .22s ease; }
+        .tm-star { width: 14px; height: 14px; display: block; flex-shrink: 0; filter: drop-shadow(0 0 2.5px var(--tm-gem-glow)); transition: transform .22s ease, filter .22s ease; }
         :host([data-density="compact"]) .tm-star,
-        :host([data-density="tight"]) .tm-star { width: 14px; height: 14px; }
-        .tm-star-dual { width: 18px; height: 18px; }
+        :host([data-density="tight"]) .tm-star { width: 13px; height: 13px; }
+        .tm-star-dual { width: 16px; height: 16px; position: relative; top: -0.5px; }
         .tm-star .tm-star-main { fill: url(#tm-gem-bar); }
         .tm-star-dual .tm-star-main { fill: url(#tm-gem-dual); }
         .tm-star-dual .tm-star-sub { fill: var(--tm-gem-a); }
@@ -1120,34 +1211,35 @@ export function buildInlineWidgetScript() {
         .tm-ring { width: 13px; height: 13px; display: block; flex-shrink: 0; }
         .tm-ring-lg { width: 24px; height: 24px; display: block; flex-shrink: 0; }
         .tm-ring-val { transition: stroke-dashoffset .45s cubic-bezier(0.22, 1, 0.36, 1), stroke .45s ease, stroke-opacity .25s ease; }
-        .tm-label { color: var(--tm-muted); font-size: 11px; font-weight: 400; letter-spacing: 0.01em; line-height: 1; }
-        .tm-val { color: var(--tm-text); font-weight: 500; opacity: 0.9; letter-spacing: -0.01em; line-height: 1; }
+        .tm-label { color: var(--tm-sub); font-size: 12px; font-weight: 400; line-height: 16px; }
+        .tm-val { color: var(--tm-text); font-family: var(--tm-num); font-size: 12px; font-weight: 500; opacity: 0.94; line-height: 16px; font-variant-numeric: tabular-nums; }
         .tm-chip:hover .tm-val, .tm-chip.active .tm-val { opacity: 1; }
         .tm-slash { color: var(--tm-faint); margin: 0 1.5px; font-weight: 400; }
-        .tm-unit { color: var(--tm-faint); font-size: 10.5px; margin-left: -2px; line-height: 1; }
+        .tm-unit { color: var(--tm-muted); font-size: 11px; margin-left: -1px; line-height: 16px; }
 
-        .tm-popover { position: fixed; z-index: 2147483600; width: min(320px, calc(100vw - 20px)); max-height: calc(100vh - 24px); overflow: auto; background: var(--tm-card); backdrop-filter: var(--tm-blur); -webkit-backdrop-filter: var(--tm-blur); border: 1px solid var(--tm-border); border-radius: var(--tm-radius); box-shadow: var(--tm-shadow); padding: 13px 14px 11px; box-sizing: border-box; display: none; }
+        .tm-popover { position: fixed; z-index: 2147483630; width: min(326px, calc(100vw - 20px)); max-height: calc(100vh - 24px); overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; background: var(--tm-card); backdrop-filter: var(--tm-blur); -webkit-backdrop-filter: var(--tm-blur); border: 1px solid var(--tm-border); border-radius: var(--tm-radius); box-shadow: var(--tm-shadow); padding: 14px 15px 12px; box-sizing: border-box; display: none; }
         .tm-popover.open { display: block; }
         .tm-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-height: 22px; margin-bottom: 10px; }
         .tm-brand-row { display: inline-flex; align-items: center; gap: 6px; min-width: 0; height: 22px; }
         .tm-head-acts { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; height: 22px; }
-        .tm-model { display: inline-flex; align-items: center; font-size: 12.5px; font-weight: 650; color: var(--tm-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 125px; letter-spacing: -0.015em; line-height: 1; }
-        .tm-status-tag { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: 99px; background: var(--tm-hover); font-family: var(--tm-mono); font-size: 10px; color: var(--tm-accent); font-weight: 500; line-height: 1; flex-shrink: 0; }
-        .tm-btn { display: inline-flex; align-items: center; justify-content: center; height: 22px; border: 1px solid var(--tm-border); background: transparent; color: var(--tm-sub); border-radius: 5px; padding: 0 7px; font-size: 10.5px; font-weight: 500; line-height: 1; cursor: pointer; font-family: inherit; transition: border-color .14s, color .14s, background .14s; }
+        .tm-model { display: inline-flex; align-items: center; font-size: 13px; font-weight: 600; color: var(--tm-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 128px; letter-spacing: -0.01em; line-height: 1; }
+        :host([lang="zh-CN"]) .tm-model { letter-spacing: 0; }
+        .tm-status-tag { display: inline-flex; align-items: center; height: 19px; padding: 0 6px; border-radius: 99px; background: var(--tm-hover); font-family: var(--tm-num); font-size: 10.5px; font-variant-numeric: tabular-nums; color: var(--tm-accent); font-weight: 500; line-height: 1; flex-shrink: 0; }
+        .tm-btn { display: inline-flex; align-items: center; justify-content: center; height: 22px; border: 1px solid var(--tm-border); background: transparent; color: var(--tm-sub); border-radius: 5px; padding: 0 7px; font-size: 11px; font-weight: 500; line-height: 1; cursor: pointer; font-family: inherit; transition: border-color .14s, color .14s, background .14s; }
         .tm-btn:hover, .tm-btn:focus-visible { border-color: var(--tm-text); color: var(--tm-text); background: var(--tm-hover); outline: none; }
 
-        .tm-hero { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
-        .tm-hero-main { display: inline-flex; align-items: baseline; gap: 4px; }
+        .tm-hero { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 7px; }
+        .tm-hero-main { display: inline-flex; align-items: baseline; gap: 5px; }
         .tm-hero-ctx { align-items: center; gap: 7px; }
-        .tm-hero-num { font-size: 26px; font-weight: 650; line-height: 1; letter-spacing: -0.035em; font-variant-numeric: tabular-nums; color: var(--tm-text); }
-        .tm-hero-unit { font-size: 11px; color: var(--tm-muted); font-weight: 500; }
-        .tm-hero-meta { font-size: 10.5px; color: var(--tm-muted); text-align: right; font-variant-numeric: tabular-nums; line-height: 1.45; }
+        .tm-hero-num { font-family: var(--tm-num); font-size: 26px; font-weight: 600; line-height: 1.08; letter-spacing: -0.025em; font-variant-numeric: tabular-nums; color: var(--tm-text); }
+        .tm-hero-unit { font-size: 11.5px; color: var(--tm-sub); font-weight: 500; line-height: 1.3; }
+        .tm-hero-meta { font-family: var(--tm-num); font-size: 11.5px; color: var(--tm-sub); text-align: right; font-variant-numeric: tabular-nums; line-height: 1.5; }
         .tm-hero-meta b { color: var(--tm-text); font-weight: 600; }
-        .tm-cost-val { color: var(--tm-cost) !important; font-family: var(--tm-mono); }
+        .tm-cost-val { color: var(--tm-cost) !important; font-family: var(--tm-num); font-weight: 500; font-variant-numeric: tabular-nums; }
         .tm-spark-wrap, .tm-trend-wrap { position: relative; color: var(--tm-text); margin: 2px 0 9px; }
         .tm-spark, .tm-trend { display: block; overflow: visible; }
         .tm-chart-interactive { cursor: pointer; }
-        .tm-chart-readout { font-family: var(--tm-mono); font-size: 10px; font-weight: 500; color: var(--tm-accent); min-height: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+        .tm-chart-readout { font-family: var(--tm-num); font-size: 11px; font-weight: 500; line-height: 1.3; color: var(--tm-accent); min-height: 14px; white-space: nowrap; font-variant-numeric: tabular-nums; }
         .tm-trend-bar { transition: fill .12s ease, fill-opacity .12s ease, opacity .12s ease, filter .12s ease; }
         .tm-trend.has-hover .tm-trend-bar { opacity: 0.32; }
         .tm-trend.has-hover .tm-trend-bar.active { opacity: 1; fill: var(--tm-accent); fill-opacity: 1; filter: drop-shadow(0 0 4px var(--tm-gem-glow)); }
@@ -1155,69 +1247,69 @@ export function buildInlineWidgetScript() {
         .tm-sp-node { transition: opacity .12s ease; }
         .tm-spark.has-hover .tm-sp-node { opacity: 0.45; }
         .tm-sp-xhair { stroke: var(--tm-muted); stroke-width: 1; stroke-dasharray: 2.5 2.5; opacity: 0.7; pointer-events: none; }
-        .tm-mini-tip { position: absolute; left: 0; top: 0; z-index: 20; pointer-events: none; background: var(--tm-card); border: 1px solid var(--tm-border); border-radius: 7px; box-shadow: 0 8px 20px -6px rgba(15,23,42,0.22), 0 1px 4px rgba(15,23,42,0.08); padding: 4px 8px; font-size: 10.5px; line-height: 1.35; color: var(--tm-text); white-space: nowrap; opacity: 0; transform: translate(-50%, calc(-100% - 6px)); transition: opacity .08s ease; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+        .tm-mini-tip { position: absolute; left: 0; top: 0; z-index: 20; pointer-events: none; max-width: calc(100% - 6px); overflow: hidden; text-overflow: ellipsis; background: var(--tm-card); border: 1px solid var(--tm-border); border-radius: 7px; box-shadow: 0 8px 20px -6px rgba(15,23,42,0.22), 0 1px 4px rgba(15,23,42,0.08); padding: 4px 8px; font-size: 11px; line-height: 1.35; color: var(--tm-text); white-space: nowrap; opacity: 0; transform: translate(-50%, calc(-100% - 6px)); transition: opacity .08s ease; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
         .tm-mini-tip.show { opacity: 1; }
-        .tm-mini-tip-date { font-family: var(--tm-mono); font-size: 9.5px; color: var(--tm-muted); margin-right: 6px; }
-        .tm-mini-tip-val { font-family: var(--tm-mono); font-weight: 600; color: var(--tm-text); font-variant-numeric: tabular-nums; }
-        .tm-mini-tip-sub { font-family: var(--tm-mono); font-size: 9.5px; color: var(--tm-sub); margin-top: 1px; }
-        .tm-sub-strip { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--tm-hairline); border-bottom: 1px solid var(--tm-hairline); padding: 7px 0; margin-bottom: 9px; }
+        .tm-mini-tip-date { font-family: var(--tm-num); font-size: 10.5px; font-variant-numeric: tabular-nums; color: var(--tm-muted); margin-right: 6px; }
+        .tm-mini-tip-val { font-family: var(--tm-num); font-weight: 600; color: var(--tm-text); font-variant-numeric: tabular-nums; }
+        .tm-mini-tip-sub { font-family: var(--tm-num); font-size: 10.5px; font-variant-numeric: tabular-nums; color: var(--tm-sub); margin-top: 1px; }
+        .tm-sub-strip { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--tm-hairline); border-bottom: 1px solid var(--tm-hairline); padding: 8px 0; margin-bottom: 9px; }
         .tm-sub-strip-tight { margin-bottom: 0; border-bottom: none; padding-bottom: 1px; }
-        .tm-sub-cell { padding: 0 8px; border-left: 1px solid var(--tm-hairline); }
+        .tm-sub-cell { padding: 0 8px; border-left: 1px solid var(--tm-hairline); min-width: 0; }
         .tm-sub-cell:first-child { padding-left: 0; border-left: none; }
-        .tm-sub-k { font-size: 10px; color: var(--tm-muted); margin-bottom: 2px; }
-        .tm-sub-v { font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--tm-text); letter-spacing: -0.015em; }
+        .tm-sub-k { font-size: 11px; line-height: 1.35; color: var(--tm-muted); margin-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .tm-sub-v { font-family: var(--tm-num); font-size: 13px; font-weight: 600; line-height: 1.25; font-variant-numeric: tabular-nums; color: var(--tm-text); }
         .tm-usage-strip { display: grid; grid-template-columns: repeat(4, 1fr); padding: 2px 0; }
-        .tm-usage-cell { padding: 0 7px; border-left: 1px solid var(--tm-hairline); }
+        .tm-usage-cell { padding: 0 7px; border-left: 1px solid var(--tm-hairline); min-width: 0; }
         .tm-usage-cell:first-child { padding-left: 0; border-left: none; }
-        .tm-usage-k { font-size: 9.5px; color: var(--tm-muted); margin-bottom: 2px; }
-        .tm-usage-v { font-family: var(--tm-mono); font-size: 11.5px; font-weight: 600; color: var(--tm-text); }
-        .tm-usage-sub { margin-top: 7px; font-family: var(--tm-mono); font-size: 10px; color: var(--tm-muted); display: flex; justify-content: space-between; gap: 6px; flex-wrap: wrap; }
+        .tm-usage-k { font-size: 11px; line-height: 1.35; color: var(--tm-muted); margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .tm-usage-v { font-family: var(--tm-num); font-size: 12px; font-weight: 600; line-height: 1.25; font-variant-numeric: tabular-nums; color: var(--tm-text); }
+        .tm-usage-sub { margin-top: 7px; font-family: var(--tm-num); font-size: 11px; line-height: 1.4; font-variant-numeric: tabular-nums; color: var(--tm-sub); display: flex; justify-content: space-between; gap: 6px; flex-wrap: wrap; }
         .tm-ctx-bar { width: 100%; height: 6px; border-radius: 99px; background: var(--tm-elev); overflow: hidden; margin: 5px 0 9px; }
         .tm-ctx-fill { height: 100%; border-radius: 99px; transition: width .35s ease, background .35s ease; }
-        .tm-ctx-note { font-size: 10.5px; color: var(--tm-muted); margin-top: 7px; }
+        .tm-ctx-note { font-size: 11.5px; line-height: 1.45; color: var(--tm-sub); margin-top: 8px; }
         .tm-ctx-note.high { color: #f2522e; font-weight: 500; }
-        .tm-ctx-note.danger { color: var(--tm-danger); font-weight: 600; }
+        .tm-ctx-note.danger { color: var(--tm-danger); font-weight: 500; }
         .tm-mbar-list { display: flex; flex-direction: column; gap: 6px; }
         .tm-mbar-row { display: flex; flex-direction: column; gap: 3px; }
-        .tm-mbar-meta { display: flex; justify-content: space-between; align-items: baseline; font-size: 11px; gap: 8px; }
-        .tm-mbar-name { color: var(--tm-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .tm-mbar-val { font-family: var(--tm-mono); font-size: 10.5px; color: var(--tm-sub); flex-shrink: 0; }
+        .tm-mbar-meta { display: flex; justify-content: space-between; align-items: baseline; font-size: 11.5px; line-height: 1.35; gap: 8px; }
+        .tm-mbar-name { color: var(--tm-text); line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .tm-mbar-val { font-family: var(--tm-num); font-size: 11px; font-variant-numeric: tabular-nums; color: var(--tm-sub); flex-shrink: 0; }
         .tm-mbar-track { width: 100%; height: 3px; border-radius: 99px; background: var(--tm-elev); overflow: hidden; }
         .tm-mbar-fill { height: 100%; border-radius: 99px; background: var(--tm-ink-bar); opacity: 0.72; }
         .tm-mbar-row:first-child .tm-mbar-fill { background: var(--tm-accent); opacity: 1; }
-        .tm-sec-flush { margin-top: 8px; padding-top: 8px; }
+        .tm-sec-flush { margin-top: 8px; padding-top: 9px; }
 
-        .tm-micro-row { display: flex; justify-content: space-between; align-items: center; gap: 6px; font-size: 10px; color: var(--tm-muted); margin-bottom: 5px; }
-        .tm-fresh { display: inline-flex; align-items: center; gap: 4px; }
-        .tm-fresh i { width: 5px; height: 5px; border-radius: 50%; display: inline-block; background: var(--tm-ok); }
+        .tm-micro-row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 3px 8px; font-size: 11px; line-height: 1.4; color: var(--tm-sub); margin-bottom: 7px; }
+        .tm-fresh { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+        .tm-fresh i { width: 5.5px; height: 5.5px; border-radius: 50%; display: inline-block; flex-shrink: 0; background: var(--tm-ok); }
         .tm-fresh.cool i { background: var(--tm-warn); }
         .tm-fresh.cold i { background: var(--tm-faint); }
-        .tm-think-tag { font-family: var(--tm-mono); color: var(--tm-sub); }
+        .tm-think-tag { font-family: var(--tm-num); font-weight: 500; font-variant-numeric: tabular-nums; color: var(--tm-sub); flex-shrink: 0; }
 
         .tm-sec { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--tm-hairline); }
-        .tm-sec-title { font-size: 10.5px; color: var(--tm-muted); margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; font-weight: 500; gap: 6px; }
-        .tm-stack { display: flex; height: 4px; border-radius: 99px; overflow: hidden; background: var(--tm-elev); gap: 1px; margin-bottom: 7px; }
+        .tm-sec-title { font-size: 11.5px; line-height: 1.35; color: var(--tm-muted); margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; font-weight: 500; gap: 6px; }
+        .tm-stack { display: flex; height: 4.5px; border-radius: 99px; overflow: hidden; background: var(--tm-elev); gap: 1px; margin-bottom: 9px; }
         .tm-st-cache { background: var(--tm-text); opacity: 0.78; }
         .tm-st-in { background: var(--tm-accent); }
         .tm-st-resp { background: var(--tm-muted); opacity: 0.65; }
         .tm-st-think { background: var(--tm-faint); opacity: 0.55; }
-        .tm-legend { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; font-size: 11px; }
+        .tm-legend { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; font-size: 11.5px; line-height: 1.4; }
         .tm-leg-item { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
-        .tm-leg-k { display: inline-flex; align-items: center; gap: 5px; color: var(--tm-muted); }
-        .tm-leg-v { font-family: var(--tm-mono); font-size: 10.5px; font-weight: 500; color: var(--tm-text); }
+        .tm-leg-k { display: inline-flex; align-items: center; gap: 5.5px; color: var(--tm-sub); font-weight: 400; }
+        .tm-leg-v { font-family: var(--tm-num); font-size: 11.5px; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--tm-text); }
         .tm-sw { width: 6px; height: 6px; border-radius: 1.5px; display: inline-block; flex-shrink: 0; }
 
         .tm-qitem { margin-bottom: 9px; }
         .tm-qitem:last-child { margin-bottom: 0; }
-        .tm-qmeta { display: flex; justify-content: space-between; align-items: baseline; font-size: 11px; margin-bottom: 4px; gap: 6px; }
-        .tm-qname { color: var(--tm-text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .tm-qmeta { display: flex; justify-content: space-between; align-items: baseline; font-size: 11.5px; line-height: 1.35; margin-bottom: 4px; gap: 6px; }
+        .tm-qname { color: var(--tm-text); font-weight: 500; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .tm-qright { display: inline-flex; align-items: baseline; gap: 6px; flex-shrink: 0; }
-        .tm-pace-pill { font-size: 9.5px; font-weight: 500; color: var(--tm-muted); }
+        .tm-pace-pill { font-size: 10.5px; font-weight: 500; color: var(--tm-muted); }
         .tm-pace-pill.fast { color: var(--tm-warn); }
         .tm-pace-pill.burn { color: var(--tm-danger); }
-        .tm-qpair { font-family: var(--tm-mono); font-size: 11px; font-weight: 600; color: var(--tm-text); }
-        .tm-qsub { display: flex; align-items: center; gap: 7px; margin-top: 4px; font-size: 10.5px; }
-        .tm-qtag { min-width: 24px; flex-shrink: 0; font-size: 10px; color: var(--tm-muted); font-family: var(--tm-mono); white-space: nowrap; }
+        .tm-qpair { font-family: var(--tm-num); font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--tm-text); }
+        .tm-qsub { display: flex; align-items: center; gap: 7px; margin-top: 4px; font-size: 11px; }
+        .tm-qtag { min-width: 24px; flex-shrink: 0; font-size: 11px; line-height: 1.3; color: var(--tm-sub); font-family: var(--tm-num); white-space: nowrap; }
         .tm-qtrack { position: relative; flex: 1; height: 9px; display: flex; align-items: center; }
         .tm-qbar { width: 100%; height: 3.5px; border-radius: 99px; background: var(--tm-elev); overflow: hidden; }
         .tm-qfill { height: 100%; border-radius: 99px; background: var(--tm-ink-bar); }
@@ -1225,15 +1317,15 @@ export function buildInlineWidgetScript() {
         .tm-qfill.danger { background: var(--tm-danger); }
         /* 节奏时间基准竖线：一眼对照“当前剩余额度 vs 窗口剩余时间” */
         .tm-pace-tick { position: absolute; top: 0; bottom: 0; width: 1.5px; background: var(--tm-text); opacity: 0.58; border-radius: 1px; pointer-events: none; transform: translateX(-50%); }
-        .tm-qsub-val { font-family: var(--tm-mono); font-size: 10px; color: var(--tm-muted); white-space: nowrap; min-width: 78px; text-align: right; display: inline-flex; justify-content: flex-end; gap: 6px; }
+        .tm-qsub-val { font-family: var(--tm-num); font-size: 11px; line-height: 1.3; font-variant-numeric: tabular-nums; color: var(--tm-muted); white-space: nowrap; min-width: 80px; text-align: right; display: inline-flex; justify-content: flex-end; gap: 6px; }
         .tm-qsub-val b { color: var(--tm-text); font-weight: 500; }
-        .tm-qsub-val em { font-style: normal; color: var(--tm-faint); }
+        .tm-qsub-val em { font-style: normal; color: var(--tm-muted); }
 
         .tm-foot { margin-top: 11px; padding-top: 9px; border-top: 1px solid var(--tm-hairline); display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-        .tm-foot-ctx { display: inline-flex; align-items: center; gap: 5px; font-family: var(--tm-mono); font-size: 10px; color: var(--tm-muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .tm-link { border: none; background: transparent; color: var(--tm-text); font-weight: 500; font-size: 11px; cursor: pointer; padding: 2px 0; font-family: inherit; flex-shrink: 0; transition: color .14s; }
-        .tm-link:hover { color: var(--tm-accent); }
-        .tm-empty { color: var(--tm-faint); font-size: 11px; text-align: center; padding: 10px 0; }
+        .tm-foot-ctx { display: inline-flex; align-items: center; gap: 5px; font-family: var(--tm-num); font-size: 11.5px; font-weight: 500; line-height: 1.35; font-variant-numeric: tabular-nums; color: var(--tm-sub); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .tm-link { border: none; background: transparent; color: var(--tm-text); font-weight: 500; font-size: 11.5px; line-height: 1.3; cursor: pointer; padding: 2px 0; font-family: inherit; flex-shrink: 0; transition: color .14s; }
+        .tm-link:hover, .tm-link:focus-visible { color: var(--tm-accent); outline: none; }
+        .tm-empty { color: var(--tm-faint); font-size: 11.5px; line-height: 1.45; text-align: center; padding: 10px 0; }
       \`;
     }
 
@@ -1294,8 +1386,12 @@ export function buildInlineWidgetScript() {
 
     function buildZActivitySvg(usage, mode) {
       var dayMap = Object.create(null);
+      var costMap = Object.create(null);
       (usage.days || []).forEach(function(d) {
-        if (d && d.date) dayMap[d.date] = safeInt(d.total);
+        if (d && d.date) {
+          dayMap[d.date] = safeInt(d.total);
+          costMap[d.date] = Number(d.costUsd) || 0;
+        }
       });
       var now = parseBaseDate(usage && usage.todayDate);
       var todayDow = now.getDay(); // 0=Sun..6=Sat
@@ -1305,6 +1401,7 @@ export function buildInlineWidgetScript() {
         var maxW = 1;
         for (var wk = 25; wk >= 0; wk--) {
           var sumW = 0;
+          var sumCostW = 0;
           var startKey = '', endKey = '';
           for (var r = 6; r >= 0; r--) {
             var dt = new Date(now);
@@ -1313,9 +1410,10 @@ export function buildInlineWidgetScript() {
             if (r === 6) startKey = k;
             if (r === 0) endKey = k;
             sumW += dayMap[k] || 0;
+            sumCostW += costMap[k] || 0;
           }
           if (sumW > maxW) maxW = sumW;
-          weeks.push({ startKey: startKey, endKey: endKey, val: sumW, month: Number(endKey.split('-')[1]) });
+          weeks.push({ startKey: startKey, endKey: endKey, val: sumW, costUsd: sumCostW, month: Number(endKey.split('-')[1]) });
         }
         var ww = 725, wh = 114, padB = 18, slot = ww / weeks.length, bw = Math.max(12, slot - 7);
         var lastLblX = -50;
@@ -1329,7 +1427,8 @@ export function buildInlineWidgetScript() {
             lastLblX = x;
             lbl = '<text x="' + x.toFixed(1) + '" y="' + (wh - 2) + '" class="tm-z-ax">' + escapeHtml(fmtMonthTick(item.month)) + '</text>';
           }
-          return '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + barH + '" rx="3.5" class="tm-z-wbar ' + cls + '" data-z-title="' + escapeHtml(item.startKey + ' ~ ' + item.endKey) + '" data-z-val="' + escapeHtml(fmtStatsTokens(item.val) + ' ' + t('tokensUnit')) + '"/>' + lbl;
+          var wCostAttr = item.costUsd > 0 ? ' data-z-cost="' + escapeHtml(fmtUsd(item.costUsd) || '') + '"' : '';
+          return '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + barH + '" rx="3.5" class="tm-z-wbar ' + cls + '" data-z-title="' + escapeHtml(item.startKey + ' ~ ' + item.endKey) + '" data-z-val="' + escapeHtml(fmtStatsTokens(item.val) + ' ' + t('tokensUnit')) + '"' + wCostAttr + '/>' + lbl;
         }).join('');
         return {
           html: '<svg class="tm-z-svg" id="tm-zact-svg" viewBox="0 0 ' + ww + ' ' + wh + '" width="100%" preserveAspectRatio="xMidYMid meet">' + wBars + '</svg>',
@@ -1447,7 +1546,9 @@ export function buildInlineWidgetScript() {
           var item = colObj.items[rr];
           if (!item) continue;
           var lvl = item.val <= 0 ? 'tm-zc-0' : item.val > maxVal * 0.72 ? 'tm-zc-4' : item.val > maxVal * 0.40 ? 'tm-zc-3' : item.val > maxVal * 0.14 ? 'tm-zc-2' : 'tm-zc-1';
-          rectsHtml += '<rect x="' + item.x + '" y="' + item.y + '" width="' + cellSize + '" height="' + cellSize + '" rx="2.6" class="tm-z-hcell ' + lvl + '" data-z-title="' + escapeHtml(item.key) + '" data-z-val="' + escapeHtml(fmtStatsTokens(item.val) + ' ' + t('tokensUnit')) + '"/>';
+          var dCostVal = costMap[item.key] || 0;
+          var dCostAttr = dCostVal > 0 ? ' data-z-cost="' + escapeHtml(fmtUsd(dCostVal) || '') + '"' : '';
+          rectsHtml += '<rect x="' + item.x + '" y="' + item.y + '" width="' + cellSize + '" height="' + cellSize + '" rx="2.6" class="tm-z-hcell ' + lvl + '" data-z-title="' + escapeHtml(item.key) + '" data-z-val="' + escapeHtml(fmtStatsTokens(item.val) + ' ' + t('tokensUnit')) + '"' + dCostAttr + '/>';
         }
       }
 
@@ -1470,8 +1571,10 @@ export function buildInlineWidgetScript() {
       var now = parseBaseDate(usage && usage.todayDate);
       var dateKeys = [];
       var modelTotals = Object.create(null);
+      var modelCosts = Object.create(null);
       var rangeTotal = 0;
       var rangeRequests = 0;
+      var rangeCostUsd = 0;
 
       for (var i = rangeDays - 1; i >= 0; i--) {
         var dt = new Date(now);
@@ -1482,16 +1585,23 @@ export function buildInlineWidgetScript() {
         if (rec) {
           rangeTotal += safeInt(rec.total);
           rangeRequests += safeInt(rec.requests);
+          rangeCostUsd += Number(rec.costUsd) || 0;
           if (rec.byModel && typeof rec.byModel === 'object') {
             Object.keys(rec.byModel).forEach(function(m) {
               var v = safeInt(rec.byModel[m]);
               if (v > 0) modelTotals[m] = (modelTotals[m] || 0) + v;
             });
           }
+          if (rec.byModelCost && typeof rec.byModelCost === 'object') {
+            Object.keys(rec.byModelCost).forEach(function(m) {
+              var c = Number(rec.byModelCost[m]);
+              if (Number.isFinite(c) && c > 0) modelCosts[m] = (modelCosts[m] || 0) + c;
+            });
+          }
         }
       }
 
-      // 附带全局均速与请求数索引
+      // 附带全局均速、单价与请求数索引
       var rankMeta = Object.create(null);
       (usage.modelRank || []).forEach(function(r) {
         if (r && r.model) rankMeta[r.model] = r;
@@ -1503,6 +1613,8 @@ export function buildInlineWidgetScript() {
           return {
             model: m,
             totalTokens: modelTotals[m],
+            costUsd: modelCosts[m] || 0,
+            pricing: meta ? meta.pricing : null,
             avgTps: meta ? meta.avgTps : null,
             requests: meta ? safeInt(meta.requests) : 0,
           };
@@ -1512,7 +1624,14 @@ export function buildInlineWidgetScript() {
       // 仅当该时间范围确实有消费但旧账本缺少 byModel 细分时回退；若本时间段本就为 0 则诚实显示无数据，不误展全历史
       if (ranked.length === 0 && rangeTotal > 0 && Array.isArray(usage.modelRank) && usage.modelRank.length > 0) {
         ranked = usage.modelRank.slice(0, 8).map(function(m) {
-          return { model: m.model, totalTokens: safeInt(m.totalTokens), avgTps: m.avgTps, requests: safeInt(m.requests) };
+          return {
+            model: m.model,
+            totalTokens: safeInt(m.totalTokens),
+            costUsd: Number(m.costUsd) || 0,
+            pricing: m.pricing || null,
+            avgTps: m.avgTps,
+            requests: safeInt(m.requests),
+          };
         });
       }
 
@@ -1539,6 +1658,7 @@ export function buildInlineWidgetScript() {
         ranked: ranked,
         rangeTotal: rangeTotal,
         rangeRequests: rangeRequests,
+        rangeCostUsd: rangeCostUsd,
         hasOtherInRange: hasOtherInRange,
       };
     }
@@ -1553,25 +1673,32 @@ export function buildInlineWidgetScript() {
         return { html: '<div class="tm-empty">' + escapeHtml(t('noData')) + '</div>', meta: null };
       }
 
+      var showCostDonut = Boolean(state.prefs && state.prefs.showCost === true);
       var maxSlices = 5;
       var slices = [];
       var otherSum = 0;
+      var otherCostSum = 0;
       for (var i = 0; i < ranked.length; i++) {
         if (i < maxSlices) {
           slices.push({
             label: ranked[i].model,
             totalTokens: ranked[i].totalTokens,
+            costUsd: ranked[i].costUsd || 0,
+            pricing: ranked[i].pricing || null,
             avgTps: ranked[i].avgTps,
             color: Z_PALETTE[i % Z_PALETTE.length],
           });
         } else {
           otherSum += ranked[i].totalTokens;
+          otherCostSum += ranked[i].costUsd || 0;
         }
       }
       if (otherSum > 0) {
         slices.push({
           label: t('otherModels'),
           totalTokens: otherSum,
+          costUsd: otherCostSum,
+          pricing: null,
           avgTps: null,
           color: '#94a3b8',
         });
@@ -1586,7 +1713,7 @@ export function buildInlineWidgetScript() {
       var sliceMeta = [];
 
       if (slices.length === 1) {
-        sliceMeta.push({ label: slices[0].label, valText: fmtStatsTokens(slices[0].totalTokens), pctText: '100%', color: slices[0].color, avgTps: slices[0].avgTps });
+        sliceMeta.push({ label: slices[0].label, valText: fmtStatsTokens(slices[0].totalTokens), pctText: '100%', color: slices[0].color, avgTps: slices[0].avgTps, costUsd: slices[0].costUsd, pricing: slices[0].pricing });
         pathsHtml = '<circle cx="' + cx + '" cy="' + cy + '" r="' + ((rOuter + rInner) / 2).toFixed(1) + '" fill="none" stroke="' + slices[0].color + '" stroke-width="' + (rOuter - rInner) + '" class="tm-z-slice" data-z-slice="0"/>';
       } else {
         // 先保护极小扇区最小弧度，再将超出 2π 的部分按可压缩余量从大扇区等比扣除，确保总弧度严格闭合于 2π 绝不越界覆盖
@@ -1624,7 +1751,7 @@ export function buildInlineWidgetScript() {
             ' L ' + x3.toFixed(2) + ' ' + y3.toFixed(2) +
             ' A ' + rInner + ' ' + rInner + ' 0 ' + largeArc + ' 0 ' + x4.toFixed(2) + ' ' + y4.toFixed(2) + ' Z';
           var pctStr = frac >= 0.1 ? Math.round(frac * 100) + '%' : (frac * 100).toFixed(1) + '%';
-          sliceMeta.push({ label: s.label, valText: fmtStatsTokens(s.totalTokens), pctText: pctStr, color: s.color, avgTps: s.avgTps });
+          sliceMeta.push({ label: s.label, valText: fmtStatsTokens(s.totalTokens), pctText: pctStr, color: s.color, avgTps: s.avgTps, costUsd: s.costUsd, pricing: s.pricing });
           pathsHtml += '<path d="' + d + '" fill="' + s.color + '" stroke="var(--tm-z-donut-gap)" stroke-width="2.2" class="tm-z-slice" data-z-slice="' + si + '"/>';
           startAngle = endAngle;
         }
@@ -1641,11 +1768,13 @@ export function buildInlineWidgetScript() {
         var share = s.totalTokens / total;
         var pctLabel = share >= 0.1 ? Math.round(share * 100) + '%' : (share * 100).toFixed(1) + '%';
         var tpsFixed = fmtFixed(s.avgTps, 1);
+        var sCostStr = showCostDonut && s.costUsd > 0 ? fmtUsd(s.costUsd) : null;
+        var sRateTip = showCostDonut && s.pricing ? buildRateTooltip(s.pricing, s.costUsd) : '';
         return '<div class="tm-z-pie-row" data-z-slice="' + si + '">' +
           '<span class="tm-z-pie-sw" style="background:' + s.color + '"></span>' +
           '<span class="tm-z-pie-name" title="' + escapeHtml(s.label) + '">' + escapeHtml(s.label) + '</span>' +
           '<span class="tm-z-pie-pct">' + escapeHtml(pctLabel) + '</span>' +
-          '<span class="tm-z-pie-sub">' + escapeHtml(fmtStatsTokens(s.totalTokens)) + ' ' + escapeHtml(t('tokensUnit')) + (tpsFixed !== null ? ' · ' + tpsFixed + ' t/s' : '') + '</span>' +
+          '<span class="tm-z-pie-sub">' + escapeHtml(fmtStatsTokens(s.totalTokens)) + ' ' + escapeHtml(t('tokensUnit')) + (tpsFixed !== null ? ' · ' + tpsFixed + ' t/s' : '') + (sCostStr ? ' · <span class="tm-cost-val"' + (sRateTip ? ' title="' + escapeHtml(sRateTip) + '"' : '') + '>' + escapeHtml(sCostStr) + '</span>' : '') + '</span>' +
         '</div>';
       }).join('') + '</div>';
 
@@ -1794,7 +1923,7 @@ export function buildInlineWidgetScript() {
           '<rect x="' + padL + '" y="' + padT + '" width="' + plotW + '" height="' + plotH + '" fill="transparent"/>' +
           xLabelsHtml +
         '</svg>',
-        meta: { w: w, padL: padL, plotW: plotW, dateKeys: dateKeys, seriesList: seriesList, seriesCoords: seriesCoords },
+        meta: { w: w, padL: padL, plotW: plotW, dateKeys: dateKeys, daysObj: daysObj, seriesList: seriesList, seriesCoords: seriesCoords },
       };
     }
 
@@ -1851,14 +1980,15 @@ export function buildInlineWidgetScript() {
           --tm-zc-0: #1b241f;
           --tm-zc-4: #10b981;
         }
-        .tm-backdrop { position: fixed; inset: 0; z-index: 2147483640; background: rgba(9,9,11,0.52); backdrop-filter: blur(6px); display: flex; align-items: center; justify-content: center; padding: 20px; }
-        .tm-modal { width: min(820px, 94vw); max-height: 88vh; overflow-y: auto; overflow-x: hidden; scrollbar-width: none; -ms-overflow-style: none; background: var(--tm-card); backdrop-filter: var(--tm-blur); -webkit-backdrop-filter: var(--tm-blur); border: 1px solid var(--tm-border); border-radius: 16px; box-shadow: var(--tm-shadow); padding: 24px 28px 22px; box-sizing: border-box; transition: background-color .22s ease, border-color .22s ease, box-shadow .22s ease; }
+        .tm-backdrop { position: fixed; inset: 0; z-index: 2147483640; background: rgba(9,9,11,0.52); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); display: flex; align-items: center; justify-content: center; padding: 20px; }
+        .tm-modal { width: min(820px, 94vw); max-height: 88vh; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-width: none; -ms-overflow-style: none; background: var(--tm-card); backdrop-filter: var(--tm-blur); -webkit-backdrop-filter: var(--tm-blur); border: 1px solid var(--tm-border); border-radius: 16px; box-shadow: var(--tm-shadow); padding: 24px 28px 22px; box-sizing: border-box; transition: background-color .22s ease, border-color .22s ease, box-shadow .22s ease; }
         .tm-modal::-webkit-scrollbar { display: none; width: 0; height: 0; }
 
         .tm-mhead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; gap: 10px; }
         .tm-mtitle-wrap { display: inline-flex; align-items: center; gap: 10px; }
-        .tm-mtitle { font-size: 20px; font-weight: 700; letter-spacing: -0.025em; color: var(--tm-text); line-height: 1.2; }
-        .tm-mbadge { font-size: 11px; font-weight: 500; color: var(--tm-muted); background: var(--tm-z-surface); padding: 3px 10px; border-radius: 99px; }
+        .tm-mtitle { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; color: var(--tm-text); line-height: 1.3; }
+        :host([lang="zh-CN"]) .tm-mtitle { letter-spacing: 0; }
+        .tm-mbadge { font-size: 11px; font-weight: 500; line-height: 1.3; color: var(--tm-muted); background: var(--tm-z-surface); padding: 3px 10px; border-radius: 99px; }
 
         .tm-z-kpis { display: grid; grid-template-columns: repeat(5, 1fr); align-items: center; background: var(--tm-z-surface); border-radius: 14px; padding: 15px 6px; margin-bottom: 14px; }
         @media (max-width: 580px) {
@@ -1867,24 +1997,27 @@ export function buildInlineWidgetScript() {
         }
         .tm-z-kpi { text-align: center; padding: 2px 8px; border-left: 1px solid var(--tm-hairline); min-width: 0; }
         .tm-z-kpi:first-child { border-left: none; }
-        .tm-z-kpi-v { font-size: 18px; font-weight: 650; letter-spacing: -0.025em; font-variant-numeric: tabular-nums; color: var(--tm-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .tm-z-kpi-k { font-size: 11px; color: var(--tm-muted); margin-top: 4px; white-space: nowrap; }
+        .tm-z-kpi-v { font-size: 18px; font-weight: 600; line-height: 1.3; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; color: var(--tm-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        :host([lang="zh-CN"]) .tm-z-kpi-v { letter-spacing: 0; }
+        .tm-z-kpi-k { font-size: 11px; line-height: 1.35; color: var(--tm-muted); margin-top: 4px; white-space: nowrap; }
+        .tm-z-kpi-cost { font-size: 11px; line-height: 1.3; color: var(--tm-cost); font-family: var(--tm-num); font-weight: 500; font-variant-numeric: tabular-nums; margin-top: 2px; }
 
         .tm-z-card { background: var(--tm-z-surface); border-radius: 14px; padding: 16px 18px; margin-bottom: 14px; }
         .tm-z-card:last-child { margin-bottom: 0; }
         .tm-z-card-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 12px; }
-        .tm-z-card-title { font-size: 13px; font-weight: 600; color: var(--tm-text); letter-spacing: -0.01em; }
-        .tm-z-card-sub { font-size: 11px; color: var(--tm-muted); font-family: var(--tm-mono); }
+        .tm-z-card-title { font-size: 13px; font-weight: 600; line-height: 1.35; color: var(--tm-text); letter-spacing: -0.01em; }
+        :host([lang="zh-CN"]) .tm-z-card-title { letter-spacing: 0; }
+        .tm-z-card-sub { font-size: 11.5px; font-weight: 500; line-height: 1.35; color: var(--tm-sub); font-family: var(--tm-num); font-variant-numeric: tabular-nums; }
 
         .tm-z-toolbar { display: flex; justify-content: space-between; align-items: center; margin: 16px 2px 10px; gap: 8px; }
         .tm-z-toolbar-label { font-size: 12px; color: var(--tm-muted); font-weight: 500; }
         .tm-z-seg { display: inline-flex; background: var(--tm-z-pill-bg); padding: 2.5px; border-radius: 999px; gap: 2px; }
-        .tm-z-seg-btn { border: none; background: transparent; color: var(--tm-muted); font-size: 11.5px; font-weight: 500; padding: 3.5px 12px; border-radius: 999px; cursor: pointer; font-family: inherit; transition: all .14s ease; }
+        .tm-z-seg-btn { border: none; background: transparent; color: var(--tm-muted); font-size: 11.5px; font-weight: 500; line-height: 1.3; padding: 3.5px 12px; border-radius: 999px; cursor: pointer; font-family: inherit; transition: all .14s ease; }
         .tm-z-seg-btn:hover { color: var(--tm-text); }
-        .tm-z-seg-btn.active { background: var(--tm-card); color: var(--tm-text); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+        .tm-z-seg-btn.active { background: var(--tm-card); color: var(--tm-text); font-weight: 500; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
 
         .tm-z-svg { display: block; width: 100%; height: auto; overflow: visible; }
-        .tm-z-ax { font-size: 10px; fill: var(--tm-muted); font-family: var(--tm-font); }
+        .tm-z-ax { font-size: 10.5px; fill: var(--tm-muted); font-family: var(--tm-sans); font-variant-numeric: tabular-nums; }
         .tm-zc-0 { fill: var(--tm-zc-0); }
         .tm-zc-1 { fill: var(--tm-zc-1); }
         .tm-zc-2 { fill: var(--tm-zc-2); }
@@ -1892,7 +2025,7 @@ export function buildInlineWidgetScript() {
         .tm-zc-4 { fill: var(--tm-zc-4); }
 
         .tm-z-legends { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
-        .tm-z-leg { display: inline-flex; align-items: center; gap: 5px; border: 1px solid transparent; background: transparent; color: var(--tm-muted); font-size: 11px; padding: 3px 9px; border-radius: 99px; cursor: pointer; font-family: inherit; transition: all .14s; }
+        .tm-z-leg { display: inline-flex; align-items: center; gap: 5px; border: 1px solid transparent; background: transparent; color: var(--tm-muted); font-size: 11px; line-height: 1.3; padding: 3px 9px; border-radius: 99px; cursor: pointer; font-family: inherit; transition: all .14s; }
         .tm-z-leg:hover { color: var(--tm-text); background: var(--tm-hover); }
         .tm-z-leg.active { background: var(--tm-card); border-color: var(--tm-border); color: var(--tm-text); font-weight: 500; }
         .tm-z-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: var(--tm-z-blue); }
@@ -1902,16 +2035,17 @@ export function buildInlineWidgetScript() {
         .tm-z-donut-box { position: relative; width: 208px; height: 208px; margin: 0 auto; }
         .tm-z-donut-svg { display: block; width: 208px; height: 208px; }
         .tm-z-donut-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; text-align: center; padding: 0 24px; }
-        .tm-z-donut-val { font-size: 16px; font-weight: 650; letter-spacing: -0.02em; color: var(--tm-text); font-variant-numeric: tabular-nums; }
-        .tm-z-donut-unit { font-size: 11px; color: var(--tm-muted); margin-top: 2px; }
+        .tm-z-donut-val { font-size: 16px; font-weight: 600; line-height: 1.25; letter-spacing: -0.02em; color: var(--tm-text); font-variant-numeric: tabular-nums; }
+        :host([lang="zh-CN"]) .tm-z-donut-val { letter-spacing: 0; }
+        .tm-z-donut-unit { font-size: 11px; line-height: 1.3; color: var(--tm-muted); margin-top: 2px; }
         .tm-z-pie-list { min-width: 0; }
         .tm-z-pie-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 2px 8px; padding: 7px 6px; margin: 0 -6px; border-radius: 8px; border-bottom: 1px solid var(--tm-hairline); transition: background .12s ease; cursor: default; }
         .tm-z-pie-row:last-child { border-bottom: none; }
         .tm-z-pie-row.active { background: var(--tm-hover); }
         .tm-z-pie-sw { width: 9px; height: 9px; border-radius: 2.5px; flex-shrink: 0; }
-        .tm-z-pie-name { font-family: var(--tm-mono); font-size: 11.5px; color: var(--tm-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .tm-z-pie-pct { font-family: var(--tm-mono); font-size: 11.5px; color: var(--tm-muted); font-variant-numeric: tabular-nums; }
-        .tm-z-pie-sub { grid-column: 2 / 4; font-size: 11px; color: var(--tm-muted); font-variant-numeric: tabular-nums; }
+        .tm-z-pie-name { font-family: var(--tm-num); font-size: 12px; font-weight: 500; line-height: 1.35; color: var(--tm-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .tm-z-pie-pct { font-family: var(--tm-num); font-size: 11.5px; font-weight: 500; line-height: 1.35; color: var(--tm-sub); font-variant-numeric: tabular-nums; }
+        .tm-z-pie-sub { grid-column: 2 / 4; font-size: 11px; line-height: 1.35; color: var(--tm-muted); font-variant-numeric: tabular-nums; }
 
         /* 图表实时互动样式：准星、高亮方块/柱/扇区与 0ms 跟随浮卡 */
         .tm-z-interactive { cursor: crosshair; }
@@ -1923,17 +2057,17 @@ export function buildInlineWidgetScript() {
         .tm-z-slice { cursor: pointer; transform-box: fill-box; transform-origin: center; transition: transform .16s ease, opacity .16s ease; }
         .tm-z-donut-svg.has-active .tm-z-slice { opacity: 0.42; }
         .tm-z-donut-svg.has-active .tm-z-slice.active { opacity: 1; transform: scale(1.035); }
-        .tm-z-tip { position: fixed; z-index: 2147483647; pointer-events: none; min-width: 158px; max-width: 270px; background: var(--tm-card); border: 1px solid var(--tm-border); border-radius: 10px; box-shadow: 0 12px 30px -8px rgba(15,23,42,0.22), 0 2px 6px rgba(15,23,42,0.08); padding: 9px 11px; font-size: 11px; color: var(--tm-text); opacity: 0; transform: translate3d(0, 3px, 0); transition: opacity .1s ease, transform .1s ease; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+        .tm-z-tip { position: fixed; z-index: 2147483647; pointer-events: none; min-width: 158px; max-width: 280px; background: var(--tm-card); border: 1px solid var(--tm-border); border-radius: 10px; box-shadow: 0 12px 30px -8px rgba(15,23,42,0.22), 0 2px 6px rgba(15,23,42,0.08); padding: 9px 11px; font-size: 11.5px; line-height: 1.35; color: var(--tm-text); opacity: 0; transform: translate3d(0, 3px, 0); transition: opacity .1s ease, transform .1s ease; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
         .tm-z-tip.show { opacity: 1; transform: translate3d(0, 0, 0); }
-        .tm-z-tip-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-weight: 600; font-size: 11.5px; color: var(--tm-text); padding-bottom: 5px; margin-bottom: 5px; border-bottom: 1px solid var(--tm-hairline); }
-        .tm-z-tip-head em { font-style: normal; font-family: var(--tm-mono); font-size: 10.5px; font-weight: 500; color: var(--tm-muted); }
+        .tm-z-tip-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-weight: 600; font-size: 11.5px; line-height: 1.35; color: var(--tm-text); padding-bottom: 5px; margin-bottom: 5px; border-bottom: 1px solid var(--tm-hairline); }
+        .tm-z-tip-head em { font-style: normal; font-family: var(--tm-num); font-size: 11px; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--tm-muted); }
         .tm-z-tip-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 2px 0; line-height: 1.35; }
-        .tm-z-tip-k { display: inline-flex; align-items: center; gap: 5px; color: var(--tm-sub); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .tm-z-tip-v { font-family: var(--tm-mono); font-weight: 600; color: var(--tm-text); flex-shrink: 0; font-variant-numeric: tabular-nums; }
+        .tm-z-tip-k { display: inline-flex; align-items: center; gap: 5px; color: var(--tm-sub); min-width: 0; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .tm-z-tip-v { font-family: var(--tm-num); font-weight: 600; color: var(--tm-text); flex-shrink: 0; font-variant-numeric: tabular-nums; }
 
         .tm-pref-row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; }
         .tm-toggles { display: flex; flex-wrap: wrap; gap: 6px; }
-        .tm-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 8px; border: 1px solid var(--tm-border); background: var(--tm-card); color: var(--tm-muted); font-size: 11.5px; cursor: pointer; transition: all .14s ease; }
+        .tm-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 8px; border: 1px solid var(--tm-border); background: var(--tm-card); color: var(--tm-muted); font-size: 11.5px; line-height: 1.3; cursor: pointer; transition: all .14s ease; }
         .tm-pill input { display: none; }
         .tm-pill-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--tm-faint); transition: background .14s; }
         .tm-pill.on { border-color: var(--tm-z-blue); color: var(--tm-text); font-weight: 500; }
@@ -1941,16 +2075,96 @@ export function buildInlineWidgetScript() {
       \`;
     }
 
+    function scheduleHoverClose() {
+      if (state.pinned) return;
+      clearTimeout(state.hoverTimer);
+      state.hoverTimer = setTimeout(function() {
+        state.popoverOpen = false;
+        state.pointerInPop = false;
+        state.hoveringPopChart = false;
+        renderBar();
+      }, 250);
+    }
+
+    /**
+     * 独立顶层浮卡 Portal：直接挂在 document.body 顶层，彻底跳出输入框容器（z-index: 1）的层叠上下文，
+     * 避免被聊天区“滚动到底部 ↓”等宿主悬浮按钮穿透遮挡。
+     */
+    function ensurePopoverHost() {
+      if (state.disposed) return null;
+      if (!popoverHost) {
+        var initLang = state.prefs && state.prefs.language === 'en' ? 'en' : 'zh-CN';
+        popoverHost = document.createElement('div');
+        popoverHost.id = POPOVER_ID;
+        popoverHost.setAttribute('lang', initLang);
+        popoverHost.style.position = 'fixed';
+        popoverHost.style.left = '0';
+        popoverHost.style.top = '0';
+        popoverHost.style.zIndex = '2147483630';
+        popoverShadow = popoverHost.attachShadow({ mode: 'closed' });
+        popoverShadow.innerHTML =
+          '<style>' + baseStyles() + '</style>' +
+          '<div class="tm-popover" id="tm-popover" lang="' + initLang + '"></div>';
+
+        var popNode = popoverShadow.getElementById('tm-popover');
+        popNode.addEventListener('mouseenter', function() {
+          clearTimeout(state.hoverTimer);
+        });
+        popNode.addEventListener('mouseleave', function() {
+          state.hoveringPopChart = false;
+          scheduleHoverClose();
+        });
+        popNode.addEventListener('pointerdown', function() {
+          state.pointerInPop = true;
+        });
+        // 使用事件委托处理浮卡内所有按钮，避免生成中 2.5s 刷新内容时吃掉点击事件
+        popNode.addEventListener('click', function(ev) {
+          if (!ev || ev.isTrusted !== true) return;
+          var btn = ev.target && ev.target.closest ? ev.target.closest('#tm-style-btn, #tm-copy-btn, #tm-lang-btn, #tm-open-modal') : null;
+          if (!btn) return;
+          var bid = btn.id;
+          if (bid === 'tm-style-btn') {
+            var styleNext = THEMES[(THEMES.indexOf(currentStyle()) + 1) % THEMES.length];
+            state.pointerInPop = false;
+            void updatePrefs({ theme: styleNext });
+          } else if (bid === 'tm-copy-btn') {
+            if (copyTextSafe(buildCopySummaryText())) {
+              state.copiedUntil = Date.now() + 1600;
+              state.pointerInPop = false;
+              renderBar();
+              setTimeout(function() { if (!state.disposed) renderBar(); }, 1650);
+            }
+          } else if (bid === 'tm-lang-btn') {
+            state.pointerInPop = false;
+            void updatePrefs({ language: state.prefs.language === 'en' ? 'zh-CN' : 'en' });
+          } else if (bid === 'tm-open-modal') {
+            clearTimeout(state.hoverTimer);
+            state.pointerInPop = false;
+            state.hoveringPopChart = false;
+            state.popoverOpen = false;
+            state.pinned = false;
+            state.modalOpen = true;
+            renderBar();
+            renderModal();
+          }
+        });
+      }
+      if (document.body && !popoverHost.isConnected) {
+        document.body.appendChild(popoverHost);
+      }
+      return popoverShadow ? popoverShadow.getElementById('tm-popover') : null;
+    }
+
     function positionPopover() {
-      if (!shadow || !hostEl) return;
-      var pop = shadow.getElementById('tm-popover');
+      if (!shadow || !hostEl || !popoverShadow) return;
+      var pop = popoverShadow.getElementById('tm-popover');
       if (!pop || !state.popoverOpen) return;
       var vv = window.visualViewport;
       var vw = vv ? vv.width : window.innerWidth;
       var vh = vv ? vv.height : window.innerHeight;
       var anchorEl = shadow.querySelector('[data-tm-chip="' + state.activeTab + '"]') || hostEl;
       var rect = anchorEl.getBoundingClientRect();
-      var pw = pop.offsetWidth || 320;
+      var pw = pop.offsetWidth || 326;
       var ph = pop.offsetHeight || 220;
       var centeredLeft = rect.left + rect.width / 2 - pw / 2;
       var left = Math.max(10, Math.min(vw - pw - 10, centeredLeft));
@@ -1963,8 +2177,12 @@ export function buildInlineWidgetScript() {
     function renderBar() {
       if (!shadow || !hostEl) return;
       state.dark = detectDarkTheme();
+      var langKey = state.prefs && state.prefs.language === 'en' ? 'en' : 'zh-CN';
       hostEl.setAttribute('data-theme', state.dark ? 'dark' : 'light');
       hostEl.setAttribute('data-style', currentStyle());
+      hostEl.setAttribute('lang', langKey);
+      var wrapRoot = shadow.getElementById('tm-wrap');
+      if (wrapRoot) wrapRoot.setAttribute('lang', langKey);
 
       var snap = state.snapshot;
       var conv = snap && snap.conversation;
@@ -2007,7 +2225,6 @@ export function buildInlineWidgetScript() {
       if (visibleTabs.indexOf(state.activeTab) < 0) state.activeTab = visibleTabs[0];
 
       var isCompact = layout.density !== 'full';
-      var langKey = prefs.language === 'en' ? 'en' : 'zh-CN';
       var layoutKey = [langKey, layout.density, layout.shown.join(','), layout.hidden.length].join('|');
 
       var chipsEl = shadow.getElementById('tm-chips');
@@ -2019,17 +2236,17 @@ export function buildInlineWidgetScript() {
             var ck = layout.shown[ci];
             var leadStar = chipItems.length === 0 ? barStar : '';
             if (ck === 'speed') {
-              chipItems.push('<button class="tm-chip" type="button" aria-expanded="false" data-tm-chip="speed" data-tm-trigger="1">' + leadStar + '<span class="tm-val" data-tm-v="speed">--</span>' + (isCompact ? '' : '<span class="tm-unit">' + escapeHtml(t('speedUnit')) + '</span>') + '</button>');
+              chipItems.push('<button class="tm-chip" type="button" aria-expanded="false" data-tm-chip="speed" data-tm-trigger="1">' + leadStar + '<span class="tm-chip-txt"><span class="tm-val" data-tm-v="speed">--</span>' + (isCompact ? '' : '<span class="tm-unit">' + escapeHtml(t('speedUnit')) + '</span>') + '</span></button>');
             } else if (ck === 'cache') {
-              chipItems.push('<button class="tm-chip" type="button" aria-expanded="false" data-tm-chip="cache" data-tm-trigger="1">' + leadStar + '<span class="tm-label">' + escapeHtml(isCompact ? t('cacheShort') : t('cacheHit')) + '</span><span class="tm-val" data-tm-v="cache">--</span></button>');
+              chipItems.push('<button class="tm-chip" type="button" aria-expanded="false" data-tm-chip="cache" data-tm-trigger="1">' + leadStar + '<span class="tm-chip-txt"><span class="tm-label">' + escapeHtml(isCompact ? t('cacheShort') : t('cacheHit')) + '</span><span class="tm-val" data-tm-v="cache">--</span></span></button>');
             } else if (ck === 'context') {
-              chipItems.push('<button class="tm-chip" type="button" aria-expanded="false" data-tm-chip="context" data-tm-trigger="1">' + leadStar + buildContextRingSvg(ctxFrac, 'bar') + (isCompact ? '' : '<span class="tm-label">' + escapeHtml(t('context')) + '</span>') + '<span class="tm-val" data-tm-v="ctx">--</span></button>');
+              chipItems.push('<button class="tm-chip" type="button" aria-expanded="false" data-tm-chip="context" data-tm-trigger="1">' + leadStar + buildContextRingSvg(ctxFrac, 'bar') + '<span class="tm-chip-txt">' + (isCompact ? '' : '<span class="tm-label">' + escapeHtml(t('context')) + '</span>') + '<span class="tm-val" data-tm-v="ctx">--</span></span></button>');
             } else if (ck === 'quota') {
-              chipItems.push('<button class="tm-chip" type="button" aria-expanded="false" data-tm-chip="quota" data-tm-trigger="1" title="' + escapeHtml(t('quotaPairTip')) + '">' + leadStar + (isCompact ? '' : '<span class="tm-label">' + escapeHtml(t('quota')) + '</span>') + '<span class="tm-val" data-tm-v="quota"><span data-tm-q="l">--</span><span class="tm-slash">/</span><span data-tm-q="r">--</span></span></button>');
+              chipItems.push('<button class="tm-chip" type="button" aria-expanded="false" data-tm-chip="quota" data-tm-trigger="1" title="' + escapeHtml(t('quotaPairTip')) + '">' + leadStar + '<span class="tm-chip-txt">' + (isCompact ? '' : '<span class="tm-label">' + escapeHtml(t('quota')) + '</span>') + '<span class="tm-val" data-tm-v="quota"><span data-tm-q="l">--</span><span class="tm-slash">/</span><span data-tm-q="r">--</span></span></span></button>');
             } else if (ck === 'today') {
-              chipItems.push('<button class="tm-chip" type="button" aria-expanded="false" data-tm-chip="today" data-tm-trigger="1">' + leadStar + '<span class="tm-label">' + escapeHtml(isCompact ? t('todayShort') : t('today')) + '</span><span class="tm-val" data-tm-v="today">--</span></button>');
+              chipItems.push('<button class="tm-chip" type="button" aria-expanded="false" data-tm-chip="today" data-tm-trigger="1">' + leadStar + '<span class="tm-chip-txt"><span class="tm-label">' + escapeHtml(isCompact ? t('todayShort') : t('today')) + '</span><span class="tm-val" data-tm-v="today">--</span></span></button>');
             } else if (ck === 'month') {
-              chipItems.push('<button class="tm-chip" type="button" aria-expanded="false" data-tm-chip="month" data-tm-trigger="1">' + leadStar + '<span class="tm-label">' + escapeHtml(isCompact ? t('monthShort') : t('month')) + '</span><span class="tm-val" data-tm-v="month">--</span></button>');
+              chipItems.push('<button class="tm-chip" type="button" aria-expanded="false" data-tm-chip="month" data-tm-trigger="1">' + leadStar + '<span class="tm-chip-txt"><span class="tm-label">' + escapeHtml(isCompact ? t('monthShort') : t('month')) + '</span><span class="tm-val" data-tm-v="month">--</span></span></button>');
             }
           }
           if (layout.density === 'mini') {
@@ -2057,7 +2274,7 @@ export function buildInlineWidgetScript() {
         if (cacheEl) cacheEl.textContent = fmtPct(cacheVal);
         var ctxEl = chipsEl.querySelector('[data-tm-v="ctx"]');
         if (ctxEl) ctxEl.textContent = fmtPct(ctxFrac);
-        var qParts = getQuotaPairParts(quotaPair, leadQuota);
+        var qParts = getQuotaPairParts(quotaPair, leadQuota, false);
         var qWrap = chipsEl.querySelector('[data-tm-v="quota"]');
         if (qWrap) {
           var ql = qWrap.querySelector('[data-tm-q="l"]');
@@ -2080,8 +2297,14 @@ export function buildInlineWidgetScript() {
         syncContextRingEl(chipsEl.querySelector('[data-tm-ring="bar"]'), ctxFrac);
       }
 
-      var pop = shadow.getElementById('tm-popover');
+      var pop = state.popoverOpen ? ensurePopoverHost() : (popoverShadow ? popoverShadow.getElementById('tm-popover') : null);
+      if (popoverHost) {
+        popoverHost.setAttribute('data-theme', state.dark ? 'dark' : 'light');
+        popoverHost.setAttribute('data-style', currentStyle());
+        popoverHost.setAttribute('lang', langKey);
+      }
       if (pop) {
+        pop.setAttribute('lang', langKey);
         pop.classList.toggle('open', state.popoverOpen);
         if (state.popoverOpen) {
           if ((state.pointerInPop || state.hoveringPopChart) && state.lastRenderedTab === state.activeTab) {
@@ -2090,9 +2313,10 @@ export function buildInlineWidgetScript() {
           }
           state.lastRenderedTab = state.activeTab;
           var card = buildFocusedPopoverModel(state.activeTab, snap, conv, usage, quotas);
-          var styleNext = THEMES[(THEMES.indexOf(currentStyle()) + 1) % THEMES.length];
           var styleBtnText = currentStyle() === 'swiss' ? t('themeSwiss') : currentStyle() === 'glass' ? t('themeGlass') : t('themeMono');
           var isCopied = Date.now() < state.copiedUntil;
+          var langBtnLabel = prefs.language === 'en' ? 'EN' : '中';
+          var langBtnTitle = prefs.language === 'en' ? 'Switch to Chinese' : '切换为英文';
 
           var nextPopHtml =
             '<div class="tm-head">' +
@@ -2103,7 +2327,7 @@ export function buildInlineWidgetScript() {
               '<div class="tm-head-acts">' +
                 '<button class="tm-btn" type="button" id="tm-style-btn" title="' + escapeHtml(t('themeLabel')) + '">' + escapeHtml(styleBtnText) + '</button>' +
                 '<button class="tm-btn" type="button" id="tm-copy-btn">' + escapeHtml(isCopied ? t('copied') : t('copyShort')) + '</button>' +
-                '<button class="tm-btn" type="button" id="tm-lang-btn">' + (prefs.language === 'en' ? '中' : 'EN') + '</button>' +
+                '<button class="tm-btn" type="button" id="tm-lang-btn" title="' + escapeHtml(langBtnTitle) + '">' + langBtnLabel + '</button>' +
               '</div>' +
             '</div>' +
             card.body +
@@ -2134,9 +2358,9 @@ export function buildInlineWidgetScript() {
         tipEl.classList.add('show');
         var wrapW = wrapEl.offsetWidth || 278;
         var tipW = tipEl.offsetWidth || 110;
-        var rawLeft = fracX * wrapW;
-        var half = tipW / 2;
-        var clamped = Math.max(half + 2, Math.min(wrapW - half - 2, rawLeft));
+        var clamped = tipW >= wrapW - 4
+          ? wrapW / 2
+          : Math.max(tipW / 2 + 2, Math.min(wrapW - tipW / 2 - 2, fracX * wrapW));
         tipEl.style.left = Math.round(clamped) + 'px';
         tipEl.style.top = Math.max(0, Math.round(topPx)) + 'px';
       }
@@ -2157,10 +2381,15 @@ export function buildInlineWidgetScript() {
           bars.forEach(function(b) {
             b.classList.toggle('active', Number(b.getAttribute('data-t-idx')) === idx);
           });
+          var showBarCost = Boolean(state.prefs && state.prefs.showCost === true);
+          var barUsd = showBarCost && item.costUsd > 0 ? fmtUsd(item.costUsd) : null;
           if (readout) {
-            readout.textContent = fmtShortDate(item.key) + ' · ' + fmtTokens(item.val);
+            readout.textContent = fmtShortDate(item.key) + ' · ' + fmtTokens(item.val) + (barUsd ? ' · ' + barUsd : '');
           }
-          var reqLine = item.reqs > 0 ? '<div class="tm-mini-tip-sub">' + item.reqs.toLocaleString() + ' ' + escapeHtml(t('requests')) + '</div>' : '';
+          var subParts = [];
+          if (item.reqs > 0) subParts.push(escapeHtml(item.reqs.toLocaleString() + ' ' + t('requests')));
+          if (barUsd) subParts.push('<span class="tm-cost-val">' + escapeHtml(barUsd) + '</span>');
+          var reqLine = subParts.length ? '<div class="tm-mini-tip-sub">' + subParts.join(' · ') + '</div>' : '';
           var topY = Math.max(4, Math.min(item.topY, meta.h - 14));
           placeMiniTip(
             tip,
@@ -2260,8 +2489,10 @@ export function buildInlineWidgetScript() {
         modalShadow = modalHost.attachShadow({ mode: 'closed' });
         document.body.appendChild(modalHost);
       }
+      var modalLang = state.prefs && state.prefs.language === 'en' ? 'en' : 'zh-CN';
       modalHost.setAttribute('data-theme', state.dark ? 'dark' : 'light');
       modalHost.setAttribute('data-style', currentStyle());
+      modalHost.setAttribute('lang', modalLang);
 
       var usage = (state.snapshot && state.snapshot.usage) || { days: [], modelRank: [] };
       var peakVal = usage.peakDay ? safeInt(usage.peakDay.total) : 0;
@@ -2331,23 +2562,31 @@ export function buildInlineWidgetScript() {
 
       var showModalCost = Boolean(state.prefs && state.prefs.showCost === true);
       var modalTotalCost = showModalCost && usage.totalCostUsd > 0 ? fmtUsd(usage.totalCostUsd) : null;
+      var modalTotalTip = showModalCost && usage.totalCostUsd > 0
+        ? (t('costLabel') + ': ' + (fmtUsdPrecise(usage.totalCostUsd) || modalTotalCost) + (usage.lifetimeCacheSavingsUsd > 0 ? ' · ' + t('costSaved') + ' ' + fmtUsd(usage.lifetimeCacheSavingsUsd) : ''))
+        : '';
       var modalMonthCost = showModalCost && usage.monthCostUsd > 0 ? fmtUsd(usage.monthCostUsd) : null;
+      var modalMonthTip = showModalCost && usage.monthCostUsd > 0
+        ? (t('costLabel') + ': ' + (fmtUsdPrecise(usage.monthCostUsd) || modalMonthCost) + (usage.monthCacheSavingsUsd > 0 ? ' · ' + t('costSaved') + ' ' + fmtUsd(usage.monthCacheSavingsUsd) : ''))
+        : '';
+      var modalTodayCost = showModalCost && usage.todayCostUsd > 0 ? fmtUsd(usage.todayCostUsd) : null;
+      var modalRangeCost = showModalCost && rangeInfo.rangeCostUsd > 0 ? fmtUsd(rangeInfo.rangeCostUsd) : null;
 
       var nextModalHtml =
         '<style>' + modalStyles() + '</style>' +
-        '<div class="tm-backdrop" id="tm-backdrop" role="dialog" aria-modal="true">' +
+        '<div class="tm-backdrop" id="tm-backdrop" role="dialog" aria-modal="true" lang="' + modalLang + '">' +
           '<div class="tm-modal" id="tm-modal-scroll">' +
             '<div class="tm-mhead">' +
               '<div class="tm-mtitle-wrap"><span class="tm-mtitle">' + escapeHtml(t('statsTitle')) + '</span><span class="tm-mbadge">' + escapeHtml(t('statsBadge')) + '</span></div>' +
               '<div class="tm-head-acts">' +
                 '<button class="tm-btn" type="button" id="tm-modal-copy">' + escapeHtml(Date.now() < state.copiedUntil ? t('copied') : t('copyStats')) + '</button>' +
-                '<button class="tm-btn" type="button" id="tm-modal-lang">' + (state.prefs.language === 'en' ? '中' : 'EN') + '</button>' +
+                '<button class="tm-btn" type="button" id="tm-modal-lang" title="' + escapeHtml(state.prefs.language === 'en' ? 'Switch to Chinese' : '切换为英文') + '">' + (state.prefs.language === 'en' ? 'EN' : '中') + '</button>' +
                 '<button class="tm-btn" type="button" id="tm-close-modal">' + escapeHtml(t('close')) + '</button>' +
               '</div>' +
             '</div>' +
             '<div class="tm-z-kpis">' +
-              '<div class="tm-z-kpi"><div class="tm-z-kpi-v">' + escapeHtml(fmtStatsTokens(usage.totalTokens)) + '</div><div class="tm-z-kpi-k">' + escapeHtml(t('kpiTotalTokens')) + (modalTotalCost ? '<div style="font-size:10px;color:var(--tm-cost);font-family:var(--tm-mono);font-weight:600;margin-top:2px;">' + escapeHtml(modalTotalCost) + '</div>' : '') + '</div></div>' +
-              '<div class="tm-z-kpi"><div class="tm-z-kpi-v">' + escapeHtml(fmtStatsTokens(usage.monthTokens)) + '</div><div class="tm-z-kpi-k">' + escapeHtml(t('kpiMonthTokens')) + (modalMonthCost ? '<div style="font-size:10px;color:var(--tm-cost);font-family:var(--tm-mono);font-weight:600;margin-top:2px;">' + escapeHtml(modalMonthCost) + '</div>' : '') + '</div></div>' +
+              '<div class="tm-z-kpi"><div class="tm-z-kpi-v">' + escapeHtml(fmtStatsTokens(usage.totalTokens)) + '</div><div class="tm-z-kpi-k">' + escapeHtml(t('kpiTotalTokens')) + (modalTotalCost ? '<div class="tm-z-kpi-cost" title="' + escapeHtml(modalTotalTip) + '">' + escapeHtml(modalTotalCost) + '</div>' : '') + '</div></div>' +
+              '<div class="tm-z-kpi"><div class="tm-z-kpi-v">' + escapeHtml(fmtStatsTokens(usage.monthTokens)) + '</div><div class="tm-z-kpi-k">' + escapeHtml(t('kpiMonthTokens')) + (modalMonthCost ? '<div class="tm-z-kpi-cost" title="' + escapeHtml(modalMonthTip) + '">' + escapeHtml(modalMonthCost) + '</div>' : '') + '</div></div>' +
               '<div class="tm-z-kpi" title="' + escapeHtml(peakDate) + '"><div class="tm-z-kpi-v">' + escapeHtml(fmtStatsTokens(peakVal)) + '</div><div class="tm-z-kpi-k">' + escapeHtml(t('kpiPeakTokens')) + '</div></div>' +
               '<div class="tm-z-kpi"><div class="tm-z-kpi-v">' + (state.prefs.language === 'en' ? (curStreak + t('daysUnit')) : (curStreak + ' ' + t('daysUnit'))) + '</div><div class="tm-z-kpi-k">' + escapeHtml(t('kpiCurrentStreak')) + '</div></div>' +
               '<div class="tm-z-kpi"><div class="tm-z-kpi-v">' + (state.prefs.language === 'en' ? (maxStreak + t('daysUnit')) : (maxStreak + ' ' + t('daysUnit'))) + '</div><div class="tm-z-kpi-k">' + escapeHtml(t('kpiLongestStreak')) + '</div></div>' +
@@ -2358,12 +2597,12 @@ export function buildInlineWidgetScript() {
             '</div>' +
             '<div class="tm-z-toolbar"><span class="tm-z-toolbar-label">' + escapeHtml(t('timeRange')) + '</span><div class="tm-z-seg">' + rangeSeg + '</div></div>' +
             '<div class="tm-z-card">' +
-              '<div class="tm-z-card-head"><span class="tm-z-card-title">' + escapeHtml(t('dailyTokenTrend')) + '</span><span class="tm-z-card-sub">' + escapeHtml(t('today')) + ' ' + escapeHtml(fmtStatsTokens(usage.todayTokens)) + '</span></div>' +
+              '<div class="tm-z-card-head"><span class="tm-z-card-title">' + escapeHtml(t('dailyTokenTrend')) + '</span><span class="tm-z-card-sub">' + escapeHtml(t('today')) + ' ' + escapeHtml(fmtStatsTokens(usage.todayTokens)) + (modalTodayCost ? ' · <span class="tm-cost-val">' + escapeHtml(modalTodayCost) + '</span>' : '') + '</span></div>' +
               '<div class="tm-z-legends">' + legendHtml + '</div>' +
               trendChart.html +
             '</div>' +
             '<div class="tm-z-card">' +
-              '<div class="tm-z-card-head"><span class="tm-z-card-title">' + escapeHtml(t('modelUsageTitle')) + '</span><span class="tm-z-card-sub">' + safeInt(rangeInfo.rangeRequests).toLocaleString() + ' ' + escapeHtml(t('requests')) + '</span></div>' +
+              '<div class="tm-z-card-head"><span class="tm-z-card-title">' + escapeHtml(t('modelUsageTitle')) + '</span><span class="tm-z-card-sub">' + safeInt(rangeInfo.rangeRequests).toLocaleString() + ' ' + escapeHtml(t('requests')) + (modalRangeCost ? ' · <span class="tm-cost-val">' + escapeHtml(modalRangeCost) + '</span>' : '') + '</span></div>' +
               modelsHtml +
             '</div>' +
             '<div class="tm-z-card">' +
@@ -2445,10 +2684,11 @@ export function buildInlineWidgetScript() {
         var vh = vv ? vv.height : window.innerHeight;
         var tw = tipEl.offsetWidth || 190;
         var th = tipEl.offsetHeight || 72;
-        var x = (ev.clientX || 0) + 14;
+        var x = Math.max(10, (ev.clientX || 0) + 14);
         var y = (ev.clientY || 0) - th - 12;
         if (x + tw + 10 > vw) x = Math.max(10, (ev.clientX || 0) - tw - 14);
-        if (y < 10) y = Math.min(vh - th - 10, (ev.clientY || 0) + 16);
+        if (y < 10) y = Math.max(10, Math.min(vh - th - 10, (ev.clientY || 0) + 16));
+        else if (y + th + 10 > vh) y = Math.max(10, vh - th - 10);
         tipEl.style.left = Math.round(x) + 'px';
         tipEl.style.top = Math.round(y) + 'px';
       }
@@ -2464,8 +2704,9 @@ export function buildInlineWidgetScript() {
           var ttl = target && target.getAttribute ? target.getAttribute('data-z-title') : null;
           if (!ttl) { hideTip(); return; }
           var val = target.getAttribute('data-z-val') || '0';
+          var zCost = showModalCost && target.getAttribute ? target.getAttribute('data-z-cost') : null;
           placeTip(ev,
-            '<div class="tm-z-tip-head"><span>' + escapeHtml(ttl) + '</span></div>' +
+            '<div class="tm-z-tip-head"><span>' + escapeHtml(ttl) + '</span>' + (zCost ? '<em class="tm-cost-val">' + escapeHtml(zCost) + '</em>' : '') + '</div>' +
             '<div class="tm-z-tip-row"><span class="tm-z-tip-k"><i class="tm-z-dot"></i>' + escapeHtml(t('tokenActivity')) + '</span><span class="tm-z-tip-v">' + escapeHtml(val) + '</span></div>'
           );
         });
@@ -2544,8 +2785,15 @@ export function buildInlineWidgetScript() {
               }).join('')
             : '<div class="tm-z-tip-row"><span class="tm-z-tip-k">' + escapeHtml(t('noData')) + '</span><span class="tm-z-tip-v">0</span></div>';
 
+          var dKey = tm.dateKeys[idx];
+          var dRec = tm.daysObj && dKey ? tm.daysObj[dKey] : null;
+          var dCostStr = showModalCost && dRec && dRec.costUsd > 0 ? fmtUsd(dRec.costUsd) : null;
+          var headRight = daySum > 0
+            ? (escapeHtml(t('sumLabel') + ' ' + fmtStatsTokens(daySum)) + (dCostStr ? ' · <span class="tm-cost-val">' + escapeHtml(dCostStr) + '</span>' : ''))
+            : '';
+
           placeTip(ev,
-            '<div class="tm-z-tip-head"><span>' + escapeHtml(fmtShortDate(tm.dateKeys[idx])) + '</span><em>' + (daySum > 0 ? escapeHtml(t('sumLabel') + ' ' + fmtStatsTokens(daySum)) : '') + '</em></div>' +
+            '<div class="tm-z-tip-head"><span>' + escapeHtml(fmtShortDate(dKey)) + '</span><em>' + headRight + '</em></div>' +
             rowsHtml
           );
         });
@@ -2583,9 +2831,11 @@ export function buildInlineWidgetScript() {
           if (dUnitEl) dUnitEl.textContent = cur.pctText;
           if (withTip && ev) {
             var curAvgFixed = fmtFixed(cur.avgTps, 1);
+            var curCostStr = showModalCost && cur.costUsd > 0 ? fmtUsd(cur.costUsd) : null;
             placeTip(ev,
               '<div class="tm-z-tip-head"><span>' + escapeHtml(cur.label) + '</span><em>' + escapeHtml(cur.pctText) + '</em></div>' +
               '<div class="tm-z-tip-row"><span class="tm-z-tip-k"><i class="tm-z-dot" style="background:' + cur.color + '"></i>' + escapeHtml(t('colTotal')) + '</span><span class="tm-z-tip-v">' + escapeHtml(cur.valText + ' ' + t('tokensUnit')) + '</span></div>' +
+              (curCostStr ? '<div class="tm-z-tip-row"><span class="tm-z-tip-k">' + escapeHtml(t('costLabel')) + '</span><span class="tm-z-tip-v tm-cost-val">' + escapeHtml(curCostStr) + '</span></div>' : '') +
               (curAvgFixed !== null ? '<div class="tm-z-tip-row"><span class="tm-z-tip-k">' + escapeHtml(t('colAvgTps')) + '</span><span class="tm-z-tip-v">' + curAvgFixed + ' tok/s</span></div>' : '')
             );
           }
@@ -2648,20 +2898,24 @@ export function buildInlineWidgetScript() {
       var anchor = findMountAnchor();
       if (!anchor || !anchor.parent) {
         if (hostEl && hostEl.isConnected) hostEl.remove();
+        state.popoverOpen = false;
+        state.pinned = false;
+        if (popoverHost && popoverHost.isConnected) popoverHost.remove();
         return;
       }
 
       if (!hostEl) {
+        var initLang = state.prefs && state.prefs.language === 'en' ? 'en' : 'zh-CN';
         hostEl = document.createElement('div');
         hostEl.id = HOST_ID;
+        hostEl.setAttribute('lang', initLang);
         shadow = hostEl.attachShadow({ mode: 'closed' });
         shadow.innerHTML =
           '<style>' + baseStyles() + '</style>' +
-          '<div class="tm-bar-wrap" id="tm-wrap"><div class="tm-chips" id="tm-chips"></div><div class="tm-popover" id="tm-popover"></div></div>';
+          '<div class="tm-bar-wrap" id="tm-wrap" lang="' + initLang + '"><div class="tm-chips" id="tm-chips"></div></div>';
 
         var wrap = shadow.getElementById('tm-wrap');
         var chipsNode = shadow.getElementById('tm-chips');
-        var popNode = shadow.getElementById('tm-popover');
         chipsNode.addEventListener('mouseover', function(e) {
           var chip = e.target && e.target.closest ? e.target.closest('[data-tm-chip]') : null;
           if (!chip) return;
@@ -2675,56 +2929,7 @@ export function buildInlineWidgetScript() {
             renderBar();
           }
         });
-        popNode.addEventListener('mouseenter', function() {
-          clearTimeout(state.hoverTimer);
-        });
-        popNode.addEventListener('mouseleave', function() {
-          state.hoveringPopChart = false;
-        });
-        popNode.addEventListener('pointerdown', function() {
-          state.pointerInPop = true;
-        });
-        // 使用事件委托处理浮卡内所有按钮，避免生成中 2.5s 刷新内容时吃掉点击事件
-        popNode.addEventListener('click', function(ev) {
-          if (!ev || ev.isTrusted !== true) return;
-          var btn = ev.target && ev.target.closest ? ev.target.closest('#tm-style-btn, #tm-copy-btn, #tm-lang-btn, #tm-open-modal') : null;
-          if (!btn) return;
-          var bid = btn.id;
-          if (bid === 'tm-style-btn') {
-            var styleNext = THEMES[(THEMES.indexOf(currentStyle()) + 1) % THEMES.length];
-            state.pointerInPop = false;
-            void updatePrefs({ theme: styleNext });
-          } else if (bid === 'tm-copy-btn') {
-            if (copyTextSafe(buildCopySummaryText())) {
-              state.copiedUntil = Date.now() + 1600;
-              state.pointerInPop = false;
-              renderBar();
-              setTimeout(function() { if (!state.disposed) renderBar(); }, 1650);
-            }
-          } else if (bid === 'tm-lang-btn') {
-            state.pointerInPop = false;
-            void updatePrefs({ language: state.prefs.language === 'en' ? 'zh-CN' : 'en' });
-          } else if (bid === 'tm-open-modal') {
-            clearTimeout(state.hoverTimer);
-            state.pointerInPop = false;
-            state.hoveringPopChart = false;
-            state.popoverOpen = false;
-            state.pinned = false;
-            state.modalOpen = true;
-            renderBar();
-            renderModal();
-          }
-        });
-        wrap.addEventListener('mouseleave', function() {
-          if (state.pinned) return;
-          clearTimeout(state.hoverTimer);
-          state.hoverTimer = setTimeout(function() {
-            state.popoverOpen = false;
-            state.pointerInPop = false;
-            state.hoveringPopChart = false;
-            renderBar();
-          }, 220);
-        });
+        wrap.addEventListener('mouseleave', scheduleHoverClose);
         chipsNode.addEventListener('click', function(e) {
           var chip = e.target && e.target.closest ? e.target.closest('[data-tm-chip]') : null;
           if (!chip) return;
@@ -2813,25 +3018,35 @@ export function buildInlineWidgetScript() {
     }
 
     function onDocClick(e) {
-      if (!state.pinned || !hostEl) return;
-      var path = e.composedPath ? e.composedPath() : [];
-      if (!path.includes(hostEl)) {
+      if (!state.popoverOpen || !hostEl) return;
+      var path = e && typeof e.composedPath === 'function' ? e.composedPath() : null;
+      var insideHost = path ? path.includes(hostEl) : Boolean(e && (e.target === hostEl || (hostEl.contains && hostEl.contains(e.target))));
+      var insidePop = popoverHost ? (path ? path.includes(popoverHost) : Boolean(e && (e.target === popoverHost || (popoverHost.contains && popoverHost.contains(e.target))))) : false;
+      if (!insideHost && !insidePop) {
+        clearTimeout(state.hoverTimer);
         state.pinned = false;
         state.popoverOpen = false;
         state.pointerInPop = false;
+        state.hoveringPopChart = false;
         renderBar();
       }
     }
 
     function onKeyDown(e) {
-      if (e.key === 'Escape') {
+      if (e && e.key === 'Escape') {
         if (state.modalOpen) {
+          if (typeof e.preventDefault === 'function') e.preventDefault();
+          if (typeof e.stopPropagation === 'function') e.stopPropagation();
           state.modalOpen = false;
           renderModal();
         } else if (state.popoverOpen) {
+          if (typeof e.preventDefault === 'function') e.preventDefault();
+          if (typeof e.stopPropagation === 'function') e.stopPropagation();
+          clearTimeout(state.hoverTimer);
           state.pinned = false;
           state.popoverOpen = false;
           state.pointerInPop = false;
+          state.hoveringPopChart = false;
           renderBar();
         }
       }
@@ -2879,6 +3094,7 @@ export function buildInlineWidgetScript() {
       window.removeEventListener('resize', onResize);
       window.removeEventListener('scroll', onScroll, true);
       if (hostEl) { hostEl.remove(); hostEl = null; shadow = null; }
+      if (popoverHost) { popoverHost.remove(); popoverHost = null; popoverShadow = null; }
       if (modalHost) { modalHost.remove(); modalHost = null; modalShadow = null; }
       delete window.__agTokenMeterMounted;
       delete window.__agTokenMeterDispose;

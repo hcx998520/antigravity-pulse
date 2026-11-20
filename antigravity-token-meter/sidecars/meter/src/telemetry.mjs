@@ -7,7 +7,7 @@
  * - 账本去重键采用局部 SHA-256 不可逆哈希，不落盘原始会话 ID 或消息 ID。
  */
 import { createHash } from 'node:crypto';
-import { computeTokenCost, getModelPricing } from './pricing.mjs';
+import { computeTokenCost, getModelPricing, roundUsd } from './pricing.mjs';
 
 const MAX_METADATA_ITEMS = 5000;
 const INT_STR_RE = /^\d{1,15}$/;
@@ -260,14 +260,43 @@ export function projectQuotaSummary(rawSummary, nowMs = Date.now()) {
 }
 
 /**
+ * 规范化模型匹配文本：统一连字符版本号（5-5 -> 5.5）、将分隔符规整为空格，并仅剥离推理强度档位后缀，
+ * 保留 "(Carbon)" / "(Argon)" / "(Neon)" / "(Hydrogen)" 等真实模型代号括号。
+ */
+function normalizeQuotaNeedle(raw) {
+  return String(raw || '')
+    .trim()
+    .toLowerCase()
+    .replace(/(\d)[-_](\d)(?!\d)/g, '$1.$2')
+    .replace(/(\d)[-_](\d)(?!\d)/g, '$1.$2')
+    .replace(/\s*\((?:x?high|medium|med|low|fast|thinking|standard|preview|beta|exp)\)\s*$/i, '')
+    .replace(/[-_\s]+(?:x?high|medium|med|low)$/i, '')
+    .replace(/[-_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
  * 从模型名提取家族归属，用于在官方分组名为通用家族名（如 "Claude and GPT models" / "Gemini Models"）时精准匹配。
  */
 function inferModelFamily(name) {
   const s = String(name || '').toLowerCase();
   if (!s) return null;
-  if (/\b(claude|anthropic)\b/.test(s)) return 'claude_gpt';
+  if (/\b(claude|anthropic|opus|sonnet|haiku|fable)\b/.test(s)) return 'claude_gpt';
   if (/\b(gpt|openai|o1|o3|o4|codex)\b/.test(s)) return 'claude_gpt';
-  if (/\bgemini\b/.test(s)) return 'gemini';
+  if (/\b(gemini|hydrogen|argon|carbon|neon|orchestrator)\b/.test(s)) return 'gemini';
+  return null;
+}
+
+/**
+ * 提取模型中的专属元素或子系列代号（如 Orchestrator (Carbon) -> carbon），以匹配按代号拆分的独立配额组。
+ */
+function extractSpecificCodename(name) {
+  const s = String(name || '').toLowerCase();
+  for (const code of ['hydrogen', 'argon', 'carbon', 'neon', 'fable', 'opus', 'sonnet', 'haiku']) {
+    if (new RegExp(`\\b${code}\\b`).test(s)) return code;
+  }
+  if (/\borchestrator\b/.test(s)) return 'carbon';
   return null;
 }
 
@@ -281,26 +310,36 @@ export function selectQuotaPair(quotas, activeModel = null) {
 
   let chosen = null;
   if (typeof activeModel === 'string' && activeModel.trim()) {
-    const needle = activeModel.trim().toLowerCase().replace(/\s*\([^)]*\)$/, '');
-    const buildHay = (q) => [q.title, q.leadModel, ...(Array.isArray(q.models) ? q.models : [])]
-      .filter((s) => typeof s === 'string')
-      .join(' ')
-      .toLowerCase();
+    const rawFull = activeModel.trim().toLowerCase();
+    const needle = normalizeQuotaNeedle(activeModel);
+    const buildHay = (q) => normalizeQuotaNeedle(
+      [q.title, q.leadModel, ...(Array.isArray(q.models) ? q.models : [])]
+        .filter((s) => typeof s === 'string')
+        .join(' ')
+    );
 
-    // 1. 优先精确子串匹配（双向兼容具体型号与通用组名）
+    // 1. 优先精确/规范化子串匹配（兼容 "claude-opus-5-5-high" <-> "Claude Opus 5.5"）
     chosen = quotas.find((q) => {
       const hay = buildHay(q);
-      const titleLow = String(q.title || '').trim().toLowerCase();
-      return Boolean(needle) && (hay.includes(needle) || (titleLow.length >= 4 && needle.includes(titleLow)));
+      const titleNorm = normalizeQuotaNeedle(q.title || '');
+      return Boolean(needle) && (hay.includes(needle) || (titleNorm.length >= 4 && needle.includes(titleNorm)));
     }) || null;
 
-    // 2. 回退按模型家族匹配（如 "Claude Opus 5.5" -> "Claude and GPT models"，"Gemini 4 Neon" -> "Gemini Models"）
+    // 2. 按专属代号匹配（如 "Orchestrator (Carbon)" / "gemini-pro-orchestrator" -> "Gemini 4 Carbon"）
     if (!chosen) {
-      const fam = inferModelFamily(needle);
+      const codename = extractSpecificCodename(rawFull);
+      if (codename) {
+        chosen = quotas.find((q) => new RegExp(`\\b${codename}\\b`).test(buildHay(q))) || null;
+      }
+    }
+
+    // 3. 回退按模型家族匹配（如 "Claude Opus 5.5" / "GPT-OSS 120B" -> "Claude and GPT models"，"Orchestrator (Carbon)" -> "Gemini Models"）
+    if (!chosen) {
+      const fam = inferModelFamily(rawFull);
       if (fam === 'claude_gpt') {
-        chosen = quotas.find((q) => /\b(claude|gpt|openai)\b/.test(buildHay(q))) || null;
+        chosen = quotas.find((q) => /\b(claude|anthropic|gpt|openai|opus|sonnet|haiku)\b/.test(buildHay(q))) || null;
       } else if (fam === 'gemini') {
-        chosen = quotas.find((q) => /\bgemini\b/.test(buildHay(q))) || null;
+        chosen = quotas.find((q) => /\b(gemini|hydrogen|argon|carbon|neon)\b/.test(buildHay(q))) || null;
       }
     }
   }
@@ -310,8 +349,8 @@ export function selectQuotaPair(quotas, activeModel = null) {
     chosen = quotas.find((q) => q.fiveHour && q.weekly) || quotas[0];
   }
 
-  const fiveHour = chosen.fiveHour || (chosen.windowKind === '5h' ? { remainingFraction: chosen.remainingFraction, resetTime: chosen.resetTime } : null);
-  const weekly = chosen.weekly || (chosen.windowKind === 'week' ? { remainingFraction: chosen.remainingFraction, resetTime: chosen.resetTime } : null);
+  const fiveHour = chosen.fiveHour || (chosen.windowKind === '5h' ? { remainingFraction: chosen.remainingFraction, resetTime: chosen.resetTime, pacing: chosen.pacing } : null);
+  const weekly = chosen.weekly || (chosen.windowKind === 'week' ? { remainingFraction: chosen.remainingFraction, resetTime: chosen.resetTime, pacing: chosen.pacing } : null);
 
   return {
     title: chosen.title || '',
@@ -336,9 +375,13 @@ export function projectUserStatus(userStatus, nowMs = Date.now(), quotaSummary =
   if (Array.isArray(configs)) {
     for (const cfg of configs.slice(0, 200)) {
       if (!cfg || typeof cfg !== 'object') continue;
-      const id = cfg.modelOrAlias?.model || cfg.modelOrAlias?.alias;
+      const modelId = cfg.modelOrAlias?.model;
+      const aliasId = cfg.modelOrAlias?.alias;
       const label = typeof cfg.label === 'string' ? cfg.label.trim().slice(0, 120) : '';
-      if (id && label) labelMap.set(String(id).slice(0, 120), label);
+      if (label) {
+        if (modelId) labelMap.set(String(modelId).trim().slice(0, 120), label);
+        if (aliasId) labelMap.set(String(aliasId).trim().slice(0, 120), label);
+      }
 
       const q = cfg.quotaInfo;
       if (q && typeof q === 'object') {
@@ -419,7 +462,14 @@ export function resolveModelName(rawId, labelMap) {
   if (!rawId || typeof rawId !== 'string') return 'Unknown';
   const key = rawId.trim().slice(0, 120);
   if (!key) return 'Unknown';
-  return labelMap?.get(key) || key;
+  if (labelMap instanceof Map) {
+    if (labelMap.has(key)) return labelMap.get(key);
+    const keyLow = key.toLowerCase();
+    for (const [k, v] of labelMap.entries()) {
+      if (String(k).toLowerCase() === keyLow) return v;
+    }
+  }
+  return key;
 }
 
 /**
@@ -455,6 +505,7 @@ export function computeConversationTelemetry({
   generatorMetadata = [],
   modelLabelMap = new Map(),
   fallbackDate = new Date().toISOString(),
+  nowMs = Date.now(),
 }) {
   const list = Array.isArray(generatorMetadata)
     ? generatorMetadata.slice(0, MAX_METADATA_ITEMS)
@@ -485,26 +536,33 @@ export function computeConversationTelemetry({
     const usage = cm.usage;
     if (!usage || typeof usage !== 'object' || Array.isArray(usage)) continue;
 
-    const uncachedInput = parseTokenCount(usage.inputTokens) ?? 0;
-    const cacheRead = parseTokenCount(usage.cacheReadTokens) ?? 0;
-    const cacheWrite = parseTokenCount(usage.cacheCreationInputTokens ?? usage.cacheWriteTokens) ?? 0;
-    const responseOut = parseTokenCount(usage.responseOutputTokens);
-    const thinkingOut = parseTokenCount(usage.thinkingOutputTokens);
+    const uncachedInput = parseTokenCount(usage.inputTokens ?? usage.uncachedInputTokens) ?? 0;
+    const cacheRead = parseTokenCount(usage.cacheReadTokens ?? usage.cacheReadInputTokens ?? usage.cachedContentTokenCount) ?? 0;
+    const cacheWrite = parseTokenCount(usage.cacheCreationInputTokens ?? usage.cacheWriteTokens ?? usage.cacheWriteInputTokens) ?? 0;
+    const responseOut = parseTokenCount(usage.responseOutputTokens ?? usage.candidatesTokenCount);
+    const thinkingOut = parseTokenCount(
+      usage.thinkingOutputTokens ?? usage.thinkingTokens ?? usage.thoughtsTokenCount ?? usage.reasoningTokens ?? usage.reasoningOutputTokens
+    );
     const rawOut = parseTokenCount(usage.outputTokens);
 
-    const effectiveOutput =
-      rawOut !== null
-        ? rawOut
-        : responseOut !== null || thinkingOut !== null
-          ? (responseOut ?? 0) + (thinkingOut ?? 0)
-          : 0;
-    const effectiveResponse =
-      responseOut !== null
-        ? responseOut
-        : thinkingOut !== null
-          ? Math.max(0, effectiveOutput - thinkingOut)
-          : effectiveOutput;
+    // 统一 Thinking Token 计费口径：
+    // 1. 若同时存在 responseOut 与 thinkingOut，总输出取 Math.max(rawOut, responseOut + thinkingOut)，防止分离式网关仅在 outputTokens 填正文而漏算思考；
+    // 2. 若仅存在 rawOut 与 thinkingOut（Antigravity LS 原生包含式），当 rawOut >= thinkingOut 时直接取 rawOut 绝不双算，当 rawOut < thinkingOut（如纯思考阶段 rawOut=0）时兜底为 thinkingOut 绝不吞零。
     const effectiveThinking = thinkingOut ?? 0;
+    let effectiveOutput = 0;
+    if (responseOut !== null && thinkingOut !== null) {
+      effectiveOutput = Math.max(rawOut ?? 0, responseOut + thinkingOut);
+    } else if (responseOut !== null) {
+      effectiveOutput = Math.max(rawOut ?? 0, responseOut);
+    } else if (rawOut !== null) {
+      effectiveOutput = Math.max(rawOut, effectiveThinking);
+    } else {
+      effectiveOutput = effectiveThinking;
+    }
+    const effectiveResponse =
+      responseOut !== null && responseOut + effectiveThinking === effectiveOutput
+        ? responseOut
+        : Math.max(0, effectiveOutput - effectiveThinking);
 
     if (uncachedInput + cacheRead + cacheWrite + effectiveOutput <= 0) continue;
 
@@ -526,13 +584,15 @@ export function computeConversationTelemetry({
     const hashedKey = hashEventKey(String(cascadeId || 'default'), rawStableId);
     const rawTs = [cm.requestTime, cm.startTime, cm.createdAt, cm.chatStartMetadata?.createdAt]
       .find((v) => typeof v === 'string' && Number.isFinite(Date.parse(v)));
+    const rawEndTs = [cm.endTime, cm.completionTime, cm.responseTime, cm.updatedAt]
+      .find((v) => typeof v === 'string' && Number.isFinite(Date.parse(v))) || null;
     const hasExactTimestamp = Boolean(rawTs);
     const ts = rawTs || fallbackDate;
 
-    // 同一请求后续出现更完整的最终快照时覆盖旧中间态
-    deduped.set(hashedKey, {
+    const candidate = {
       id: hashedKey,
       timestamp: ts,
+      endTimestamp: rawEndTs,
       hasExactTimestamp,
       model: modelName,
       inputTokens: uncachedInput,
@@ -543,7 +603,36 @@ export function computeConversationTelemetry({
       thinkingTokens: effectiveThinking,
       streamingSeconds: streamingSec,
       ttftSeconds: ttftSec,
-    });
+    };
+
+    const prev = deduped.get(hashedKey);
+    if (!prev) {
+      deduped.set(hashedKey, candidate);
+    } else {
+      // 合并同一请求的多帧快照：单调保留更大计数值与已测流式时长/精确时间戳，防乱序冲掉关键字段
+      const prevSum = prev.inputTokens + prev.cacheReadTokens + prev.cacheWriteTokens + prev.outputTokens;
+      const nextSum = candidate.inputTokens + candidate.cacheReadTokens + candidate.cacheWriteTokens + candidate.outputTokens;
+      const mergedOut = Math.max(prev.outputTokens, candidate.outputTokens);
+      const mergedThink = Math.max(prev.thinkingTokens, candidate.thinkingTokens);
+      const mergedResp = nextSum > prevSum && responseOut !== null && responseOut + mergedThink === mergedOut
+        ? candidate.responseOutputTokens
+        : Math.max(0, mergedOut - mergedThink);
+      deduped.set(hashedKey, {
+        id: hashedKey,
+        timestamp: candidate.hasExactTimestamp ? candidate.timestamp : prev.timestamp,
+        endTimestamp: candidate.endTimestamp || prev.endTimestamp,
+        hasExactTimestamp: candidate.hasExactTimestamp || prev.hasExactTimestamp,
+        model: candidate.model !== 'Unknown' ? candidate.model : prev.model,
+        inputTokens: Math.max(prev.inputTokens, candidate.inputTokens),
+        cacheReadTokens: Math.max(prev.cacheReadTokens, candidate.cacheReadTokens),
+        cacheWriteTokens: Math.max(prev.cacheWriteTokens, candidate.cacheWriteTokens),
+        outputTokens: mergedOut,
+        responseOutputTokens: mergedResp,
+        thinkingTokens: mergedThink,
+        streamingSeconds: candidate.streamingSeconds ?? prev.streamingSeconds,
+        ttftSeconds: candidate.ttftSeconds ?? prev.ttftSeconds,
+      });
+    }
   }
 
   let totalUncachedInput = 0;
@@ -559,10 +648,13 @@ export function computeConversationTelemetry({
 
   let latestSample = null;
   let latestModel = null;
+  let latestPromptTokens = 0;
+  let latestCacheHitRate = null;
   let lastRequestMs = 0;
   let lastRequestTime = null;
   let totalCostUsd = 0;
   let totalCacheSavingsUsd = 0;
+  const turnPrompts = [];
   const sparkline = [];
   const ledgerEvents = [];
 
@@ -574,17 +666,39 @@ export function computeConversationTelemetry({
     totalResponseOutput += item.responseOutputTokens;
     totalThinkingOutput += item.thinkingTokens;
     latestModel = item.model;
-    const itemMs = Date.parse(item.timestamp);
-    if (Number.isFinite(itemMs) && itemMs >= lastRequestMs) {
-      lastRequestMs = itemMs;
-      lastRequestTime = item.timestamp;
+
+    const stepPromptTokens = item.inputTokens + item.cacheWriteTokens + item.cacheReadTokens;
+    latestPromptTokens = stepPromptTokens;
+    latestCacheHitRate = stepPromptTokens > 0
+      ? Number((item.cacheReadTokens / stepPromptTokens).toFixed(4))
+      : null;
+    turnPrompts.push(stepPromptTokens);
+
+    const itemStartMs = Date.parse(item.timestamp);
+    // 计算请求真实活跃结束时刻（用于 Prompt Cache 保鲜度，避免长思考 4~10 分钟刚结束即被误判为缓存过期）
+    let itemActiveMs = itemStartMs;
+    if (item.endTimestamp) {
+      const endMs = Date.parse(item.endTimestamp);
+      if (Number.isFinite(endMs) && (!Number.isFinite(itemStartMs) || endMs >= itemStartMs)) {
+        itemActiveMs = endMs;
+      }
+    } else if (Number.isFinite(itemStartMs) && item.streamingSeconds !== null && item.streamingSeconds > 0) {
+      const estEndMs = itemStartMs + Math.round(item.streamingSeconds * 1000);
+      itemActiveMs = itemStartMs <= nowMs ? Math.min(nowMs, estEndMs) : estEndMs;
     }
+
+    if (Number.isFinite(itemActiveMs) && itemActiveMs >= lastRequestMs) {
+      lastRequestMs = itemActiveMs;
+      lastRequestTime = new Date(itemActiveMs).toISOString();
+    }
+
     const stepCost = computeTokenCost({
       model: item.model,
       inputTokens: item.inputTokens + item.cacheWriteTokens,
       cacheReadTokens: item.cacheReadTokens,
       outputTokens: item.outputTokens,
-    }, Number.isFinite(itemMs) ? itemMs : Date.now());
+      promptTokens: stepPromptTokens,
+    }, Number.isFinite(itemStartMs) ? itemStartMs : nowMs);
     if (stepCost) {
       totalCostUsd += stepCost.costUsd;
       totalCacheSavingsUsd += stepCost.cacheSavingsUsd;
@@ -628,6 +742,15 @@ export function computeConversationTelemetry({
     });
   }
 
+  const isRunning = status === 'CASCADE_RUN_STATUS_RUNNING';
+  if (isRunning && deduped.size > 0 && Number.isFinite(nowMs)) {
+    // 正在流式生成中的对话上下文处于实时热连接保鲜态
+    if (nowMs >= lastRequestMs) {
+      lastRequestMs = nowMs;
+      lastRequestTime = new Date(nowMs).toISOString();
+    }
+  }
+
   const totalInputAll = totalUncachedInput + totalCacheRead + totalCacheWrite;
   const totalTokens = totalInputAll + totalOutput;
   const cacheHitRate = totalInputAll > 0 ? totalCacheRead / totalInputAll : null;
@@ -637,23 +760,38 @@ export function computeConversationTelemetry({
     : null;
 
   let enrichedContext = latestContext;
-  if (latestContext && deduped.size >= 2) {
-    const avgTurnDelta = (totalUncachedInput + totalOutput) / deduped.size;
-    const estTurns = latestContext.remainingTokens <= 0
-      ? 0
-      : avgTurnDelta >= 200
+  if (latestContext) {
+    if (latestContext.remainingTokens <= 0) {
+      enrichedContext = { ...latestContext, estimatedTurnsLeft: 0 };
+    } else if (deduped.size >= 2) {
+      // 优先提取相邻轮次总上下文正向净增长量（免疫缓存过期重算虚增 uncachedInput 与 Claude cacheWrite 归类差异）
+      const growthSamples = [];
+      for (let k = 1; k < turnPrompts.length; k++) {
+        const diff = turnPrompts[k] - turnPrompts[k - 1];
+        if (diff > 0) growthSamples.push(diff);
+      }
+      const recentGrowth = growthSamples.slice(-8);
+      const avgTurnDelta = recentGrowth.length > 0
+        ? recentGrowth.reduce((a, b) => a + b, 0) / recentGrowth.length
+        : (totalUncachedInput + totalCacheWrite + totalOutput) / deduped.size;
+
+      const estTurns = avgTurnDelta >= 200
         ? Math.max(0, Math.min(999, Math.floor(latestContext.remainingTokens / avgTurnDelta)))
         : null;
-    enrichedContext = { ...latestContext, estimatedTurnsLeft: estTurns };
+      enrichedContext = { ...latestContext, estimatedTurnsLeft: estTurns };
+    }
   }
 
   const resolvedModel = latestModel || latestSample?.model || null;
-  const resolvedPricing = resolvedModel ? getModelPricing(resolvedModel) : null;
+  const effectiveCtxTokens = Math.max(latestPromptTokens, latestContext?.usedTokens ?? 0);
+  const resolvedPricing = resolvedModel
+    ? getModelPricing(resolvedModel, lastRequestMs > 0 ? lastRequestMs : nowMs, { promptTokens: effectiveCtxTokens })
+    : null;
 
   return {
     cascadeId,
     status: String(status || ''),
-    running: status === 'CASCADE_RUN_STATUS_RUNNING',
+    running: isRunning,
     model: resolvedModel,
     lastRequestTime,
     requests: ledgerEvents.length,
@@ -664,9 +802,10 @@ export function computeConversationTelemetry({
     ttftSeconds: latestSample ? latestSample.ttft : null,
     streamingSeconds: Number(weightedStreamingSec.toFixed(2)),
     cacheHitRate: cacheHitRate !== null ? Number(cacheHitRate.toFixed(4)) : null,
+    latestCacheHitRate,
     thinkingRatio,
-    costUsd: ledgerEvents.length > 0 ? Number(totalCostUsd.toFixed(6)) : null,
-    cacheSavingsUsd: ledgerEvents.length > 0 ? Number(totalCacheSavingsUsd.toFixed(6)) : null,
+    costUsd: ledgerEvents.length > 0 ? roundUsd(totalCostUsd) : null,
+    cacheSavingsUsd: ledgerEvents.length > 0 ? roundUsd(totalCacheSavingsUsd) : null,
     pricing: resolvedPricing,
     tokens: {
       total: totalTokens,

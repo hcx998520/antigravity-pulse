@@ -3,7 +3,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, isAbsolute } from 'node:path';
+import { posix, win32 } from 'node:path';
 
 /**
  * 解析当前平台下 Antigravity 及 TokenMeter 插件路径。
@@ -14,6 +14,8 @@ export function resolvePaths({
   home = homedir(),
   env = process.env,
 } = {}) {
+  const pathImpl = platform === 'win32' ? win32 : posix;
+  const { join, isAbsolute } = pathImpl;
   let appSupport;
   let localRoot;
 
@@ -45,11 +47,19 @@ export function resolvePaths({
   }
 
   const defaultProfile = join(appSupport, 'Antigravity');
+  const envProfile = typeof env.AG_TM_PROFILE === 'string' && env.AG_TM_PROFILE.trim() && isAbsolute(env.AG_TM_PROFILE.trim())
+    ? env.AG_TM_PROFILE.trim()
+    : null;
+  const savedProfile = typeof savedSettings.profile === 'string' && savedSettings.profile.trim() && isAbsolute(savedSettings.profile.trim())
+    ? savedSettings.profile.trim()
+    : null;
+
   const profileCandidates = [];
   for (const candidate of [
-    env.AG_TM_PROFILE,
-    typeof savedSettings.profile === 'string' && isAbsolute(savedSettings.profile) ? savedSettings.profile : null,
+    envProfile,
+    savedProfile,
     defaultProfile,
+    platform === 'linux' ? join(appSupport, 'antigravity') : null,
   ]) {
     if (candidate && !profileCandidates.includes(candidate)) {
       profileCandidates.push(candidate);

@@ -25,8 +25,11 @@
       --ok-dot: #16a34a;
       --warn-bg: #fffbeb;
       --warn-fg: #92400e;
-      --mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", "Consolas", monospace;
-      --font: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      --tm-sans: "Google Sans Flex", "Google Sans", -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "Inter", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", "Source Han Sans SC", "Noto Sans CJK SC", "WenQuanYi Micro Hei", sans-serif;
+      --tm-mono: ui-monospace, "SF Mono", "SFMono-Regular", "Cascadia Mono", "JetBrains Mono", "Consolas", "Liberation Mono", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", "Source Han Sans SC", "Noto Sans CJK SC", "WenQuanYi Micro Hei", monospace;
+      --tm-num: var(--tm-sans);
+      --mono: var(--tm-mono);
+      --font: var(--tm-sans);
       --radius: 10px;
     }
     @media (prefers-color-scheme: dark) {
@@ -65,6 +68,7 @@
       }
     }
     html[data-style="mono"] {
+      --tm-num: var(--tm-mono);
       --bg: #eef2ee;
       --card: #f6f8f6;
       --elev: #e6ece6;
@@ -96,43 +100,46 @@
       min-height: 100vh;
       background: var(--bg);
       color: var(--text);
-      font-family: var(--font);
+      font-family: var(--tm-sans);
       font-size: 12.5px;
-      -webkit-font-smoothing: antialiased;
+      line-height: 1.45;
+      font-kerning: normal;
     }
     .head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 8px; }
-    .brand { font-size: 14.5px; font-weight: 650; display: inline-flex; align-items: center; gap: 7px; letter-spacing: -0.015em; line-height: 1; }
-    .brand-star { width: 19px; height: 19px; display: block; flex-shrink: 0; filter: drop-shadow(0 0 3px rgba(59, 130, 246, 0.34)); }
+    .brand { font-size: 14.5px; font-weight: 600; display: inline-flex; align-items: center; gap: 7px; letter-spacing: -0.01em; line-height: 1; }
+    html[lang="zh-CN"] .brand { letter-spacing: 0; }
+    .brand-star { width: 17px; height: 17px; display: block; flex-shrink: 0; position: relative; top: -0.5px; filter: drop-shadow(0 0 3px rgba(59, 130, 246, 0.34)); }
     .brand-star .s-main { fill: url(#p-gem-grad); }
     .brand-star .s-sub { fill: #38bdf8; }
     html[data-style="mono"] .brand-star { filter: drop-shadow(0 0 3px rgba(16, 185, 129, 0.36)); }
     html[data-style="mono"] .brand-star .s-main { fill: #10b981; }
     html[data-style="mono"] .brand-star .s-sub { fill: #6ee7b7; }
-    .ver { font-family: var(--mono); font-size: 10.5px; color: var(--faint); font-weight: 400; }
+    .ver { font-family: var(--tm-num); font-size: 10.5px; color: var(--faint); font-weight: 400; font-variant-numeric: tabular-nums; }
     .actions { display: flex; gap: 6px; }
-    button { border: 1px solid var(--border); background: var(--card); color: var(--sub); border-radius: 6px; padding: 3px 9px; font-size: 11.5px; font-weight: 500; cursor: pointer; transition: border-color .14s, color .14s; }
-    button:hover { border-color: var(--text); color: var(--text); }
+    button { font-family: inherit; border: 1px solid var(--border); background: var(--card); color: var(--sub); border-radius: 6px; padding: 3px 9px; font-size: 11.5px; font-weight: 500; line-height: 1.3; cursor: pointer; transition: border-color .14s, color .14s, background .14s; }
+    button:hover, button:focus-visible { border-color: var(--text); color: var(--text); outline: none; }
 
     .banner { padding: 8px 11px; border-radius: 8px; font-size: 11.5px; line-height: 1.5; margin-bottom: 12px; border: 1px solid var(--border); background: var(--card); color: var(--sub); display: flex; align-items: center; gap: 7px; }
     .banner.ok::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--ok-dot); flex-shrink: 0; }
     .banner.warn { background: var(--warn-bg); color: var(--warn-fg); }
 
-    .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 13px 14px; margin-bottom: 10px; backdrop-filter: blur(18px); }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 13px 14px; margin-bottom: 10px; backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }
     .hero-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 6px; }
     .hero-speed { display: inline-flex; align-items: baseline; gap: 4px; }
-    .hero-num { font-size: 28px; font-weight: 650; letter-spacing: -0.035em; line-height: 1; font-variant-numeric: tabular-nums; }
-    .hero-unit { font-size: 11px; color: var(--muted); font-weight: 500; }
-    .model-tag { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 165px; }
+    .hero-num { font-size: 28px; font-weight: 600; letter-spacing: -0.03em; line-height: 1.08; font-variant-numeric: tabular-nums; }
+    .hero-unit { font-size: 11.5px; color: var(--muted); font-weight: 500; }
+    .model-tag { font-size: 11.5px; font-weight: 500; line-height: 1.35; color: var(--sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 176px; }
     .spark-box { color: var(--text); margin: 4px 0 10px; }
 
     .strip { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--hairline); padding-top: 9px; }
-    .strip-cell { padding: 0 9px; border-left: 1px solid var(--hairline); }
+    .strip-cell { padding: 0 9px; border-left: 1px solid var(--hairline); min-width: 0; }
     .strip-cell:first-child { padding-left: 0; border-left: none; }
     .usage-strip { display: grid; grid-template-columns: repeat(4, 1fr); padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px solid var(--hairline); }
     .usage-cell { padding: 0 7px; border-left: 1px solid var(--hairline); min-width: 0; }
     .usage-cell:first-child { padding-left: 0; border-left: none; }
-    .usage-k { font-size: 10px; color: var(--muted); margin-bottom: 2px; white-space: nowrap; }
-    .usage-v { font-family: var(--mono); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; color: var(--text); }
+    .usage-k { font-size: 11px; line-height: 1.3; color: var(--muted); margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .usage-v { font-family: var(--tm-num); font-size: 13px; font-weight: 600; line-height: 1.25; font-variant-numeric: tabular-nums; letter-spacing: -0.015em; color: var(--text); }
+    .usage-cost { display: block; font-family: var(--tm-num); font-size: 10.5px; font-weight: 500; line-height: 1.25; font-variant-numeric: tabular-nums; color: var(--cost); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .heat { width: 100%; }
     .heat svg { display: block; width: 100%; height: auto; }
     .h-c0 { fill: var(--elev); }
@@ -150,22 +157,22 @@
     html[data-style="mono"] .h-c2 { fill: rgba(16, 185, 129, 0.48); }
     html[data-style="mono"] .h-c3 { fill: rgba(16, 185, 129, 0.75); }
     html[data-style="mono"] .h-c4 { fill: #10b981; }
-    .kpi-label { font-size: 10.5px; color: var(--muted); margin-bottom: 2px; }
-    .kpi-val { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+    .kpi-label { font-size: 11px; line-height: 1.3; color: var(--muted); margin-bottom: 2px; }
+    .kpi-val { font-size: 14px; font-weight: 600; line-height: 1.25; font-variant-numeric: tabular-nums; letter-spacing: -0.015em; }
     .kpi-ctx-row { display: inline-flex; align-items: center; gap: 5px; }
     .ctx-ring { width: 14px; height: 14px; display: block; flex-shrink: 0; }
     .ctx-ring-val { transition: stroke-dashoffset .45s cubic-bezier(0.22, 1, 0.36, 1), stroke .45s ease, stroke-opacity .25s ease; }
 
-    .sec-title { font-size: 11px; font-weight: 500; color: var(--muted); margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-    .sec-title > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sec-title { font-size: 11.5px; font-weight: 500; line-height: 1.35; color: var(--muted); margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .sec-sub { font-family: var(--tm-num); font-size: 11px; font-weight: 500; line-height: 1.35; font-variant-numeric: tabular-nums; color: var(--sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .q-item { margin-bottom: 9px; }
     .q-item:last-child { margin-bottom: 0; }
-    .q-meta { display: flex; justify-content: space-between; align-items: baseline; font-size: 11.5px; margin-bottom: 4px; gap: 6px; }
-    .q-name { font-weight: 500; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .q-pair { font-family: var(--mono); font-size: 11.5px; font-weight: 600; color: var(--text); flex-shrink: 0; }
+    .q-meta { display: flex; justify-content: space-between; align-items: baseline; font-size: 11.5px; line-height: 1.35; margin-bottom: 4px; gap: 6px; }
+    .q-name { font-weight: 500; line-height: 1.35; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .q-pair { font-family: var(--tm-num); font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text); flex-shrink: 0; }
     .q-slash { color: var(--faint); margin: 0 1.5px; font-weight: 400; }
     .q-sub { display: flex; align-items: center; gap: 7px; margin-top: 4px; font-size: 11px; }
-    .q-tag { min-width: 24px; flex-shrink: 0; font-family: var(--mono); font-size: 10px; color: var(--muted); white-space: nowrap; }
+    .q-tag { min-width: 24px; flex-shrink: 0; font-family: var(--tm-num); font-size: 10.5px; line-height: 1.3; color: var(--muted); white-space: nowrap; }
     .q-track { position: relative; flex: 1; height: 9px; display: flex; align-items: center; }
     .q-bar { width: 100%; height: 3.5px; border-radius: 99px; background: var(--elev); overflow: hidden; }
     .q-fill { height: 100%; background: var(--ink-bar); border-radius: 99px; }
@@ -173,20 +180,20 @@
     .q-fill.danger { background: var(--danger); }
     .q-tick { position: absolute; top: 0; bottom: 0; width: 1.5px; background: var(--text); opacity: 0.58; border-radius: 1px; transform: translateX(-50%); }
     .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; padding: 2px; gap: 2px; background: var(--elev); margin-top: 8px; }
-    .seg button { border: none; background: transparent; padding: 3px 9px; border-radius: 5px; font-size: 11px; color: var(--muted); }
-    .seg button.active { background: var(--card); color: var(--text); font-weight: 600; }
-    .q-sub-val { font-family: var(--mono); font-size: 10.5px; color: var(--muted); white-space: nowrap; min-width: 82px; text-align: right; display: inline-flex; justify-content: flex-end; gap: 6px; }
+    .seg button { border: none; background: transparent; padding: 3px 9px; border-radius: 5px; font-size: 11.5px; color: var(--muted); }
+    .seg button.active { background: var(--card); color: var(--text); font-weight: 500; }
+    .q-sub-val { font-family: var(--tm-num); font-size: 11px; line-height: 1.3; font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; min-width: 82px; text-align: right; display: inline-flex; justify-content: flex-end; gap: 6px; }
     .q-sub-val b { color: var(--text); font-weight: 500; }
-    .q-sub-val em { font-style: normal; color: var(--faint); }
+    .q-sub-val em { font-style: normal; color: var(--muted); }
 
     table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
-    th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--hairline); font-variant-numeric: tabular-nums; }
-    th { color: var(--muted); font-size: 10.5px; font-weight: 500; }
-    td:not(:first-child) { font-family: var(--mono); font-size: 11px; }
-    .cost-sub { display: block; font-size: 9.5px; color: var(--cost); font-weight: 600; margin-top: 1px; }
-    .rate-sub { display: block; font-size: 9px; color: var(--faint); font-family: var(--mono); margin-top: 1px; }
+    th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--hairline); font-variant-numeric: tabular-nums; line-height: 1.35; }
+    th { color: var(--muted); font-size: 11px; font-weight: 500; }
+    td:not(:first-child) { font-family: var(--tm-num); font-size: 11.5px; }
+    .cost-sub { display: block; font-family: var(--tm-num); font-size: 10.5px; color: var(--cost); font-weight: 500; font-variant-numeric: tabular-nums; margin-top: 1px; }
+    .rate-sub { display: block; font-size: 10.5px; color: var(--muted); font-family: var(--tm-num); font-variant-numeric: tabular-nums; margin-top: 1px; }
     .toggles { display: flex; flex-wrap: wrap; gap: 6px; }
-    .pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--muted); font-size: 11.5px; cursor: pointer; transition: all .14s; }
+    .pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--muted); font-size: 11.5px; line-height: 1.3; cursor: pointer; transition: all .14s; }
     .pill input { display: none; }
     .pill-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
     .pill.on { border-color: var(--text); color: var(--text); background: var(--elev); font-weight: 500; }
@@ -204,14 +211,14 @@
             <stop offset="100%" stop-color="#7c3aed"/>
           </linearGradient>
         </defs>
-        <path class="s-main" d="M10.2 3.2 C11.3 9.4 13.4 11.5 19.6 12.6 C13.4 13.7 11.3 15.8 10.2 22 C9.1 15.8 7 13.7 0.8 12.6 C7 11.5 9.1 9.4 10.2 3.2 Z"/>
-        <path class="s-sub" d="M19.4 2.4 C19.9 4.5 20.6 5.2 22.7 5.7 C20.6 6.2 19.9 6.9 19.4 9 C18.9 6.9 18.2 6.2 16.1 5.7 C18.2 5.2 18.9 4.5 19.4 2.4 Z"/>
+        <path class="s-main" d="M10.4 3 C11.5 9.0 13.4 10.9 19.4 12 C13.4 13.1 11.5 15.0 10.4 21 C9.3 15.0 7.4 13.1 1.4 12 C7.4 10.9 9.3 9.0 10.4 3 Z"/>
+        <path class="s-sub" d="M19.4 2.0 C19.85 3.95 20.45 4.55 22.4 5.0 C20.45 5.45 19.85 6.05 19.4 8.0 C18.95 6.05 18.35 5.45 16.4 5.0 C18.35 4.55 18.95 3.95 19.4 2.0 Z"/>
       </svg>
       <span data-k="brand">TokenMeter</span>
       <span id="ver" class="ver"></span>
     </div>
     <div class="actions">
-      <button id="lang-btn" type="button">EN</button>
+      <button id="lang-btn" type="button" title="切换为英文">中</button>
       <button id="refresh-btn" type="button">刷新</button>
     </div>
   </div>
@@ -235,23 +242,23 @@
   </div>
 
   <div class="card">
-    <div class="sec-title"><span data-k="usageOverview"></span><span id="u-meta" style="font-family:var(--mono);font-size:10px;"></span></div>
+    <div class="sec-title"><span data-k="usageOverview"></span><span id="u-meta" class="sec-sub"></span></div>
     <div class="usage-strip">
-      <div class="usage-cell"><div class="usage-k" data-k="today"></div><div class="usage-v" id="u-today">0</div></div>
-      <div class="usage-cell"><div class="usage-k" data-k="week"></div><div class="usage-v" id="u-week">0</div></div>
-      <div class="usage-cell"><div class="usage-k" data-k="month"></div><div class="usage-v" id="u-month">0</div></div>
-      <div class="usage-cell"><div class="usage-k" data-k="lifetime"></div><div class="usage-v" id="u-total">0</div></div>
+      <div class="usage-cell"><div class="usage-k" data-k="today"></div><div class="usage-v" id="u-today">0</div><span class="usage-cost" id="u-today-cost"></span></div>
+      <div class="usage-cell"><div class="usage-k" data-k="week"></div><div class="usage-v" id="u-week">0</div><span class="usage-cost" id="u-week-cost"></span></div>
+      <div class="usage-cell"><div class="usage-k" data-k="month"></div><div class="usage-v" id="u-month">0</div><span class="usage-cost" id="u-month-cost"></span></div>
+      <div class="usage-cell"><div class="usage-k" data-k="lifetime"></div><div class="usage-v" id="u-total">0</div><span class="usage-cost" id="u-total-cost"></span></div>
     </div>
     <div class="heat" id="heatmap"></div>
   </div>
 
   <div class="card">
-    <div class="sec-title"><span data-k="quotaTitle"></span><span id="quota-legend" style="font-family:var(--mono);font-size:10px;"></span></div>
+    <div class="sec-title"><span data-k="quotaTitle"></span><span id="quota-legend" class="sec-sub"></span></div>
     <div id="quotas"></div>
   </div>
 
   <div class="card">
-    <div class="sec-title"><span data-k="modelRankTitle"></span><span id="today-sum" style="font-family:var(--mono);font-size:10.5px;"></span></div>
+    <div class="sec-title"><span data-k="modelRankTitle"></span><span id="today-sum" class="sec-sub"></span></div>
     <table><thead><tr><th data-k="colModel"></th><th data-k="colTotal"></th><th data-k="colAvgTps"></th><th data-k="colReq"></th></tr></thead><tbody id="rank-body"></tbody></table>
   </div>
 

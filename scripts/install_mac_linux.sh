@@ -156,9 +156,27 @@ trap - ERR
 rm -rf "$PREV_DIR"
 
 if [[ ! -f "$CFG_DIR/preferences.json" ]]; then
-  cat > "$CFG_DIR/preferences.json" <<'EOF'
+  INIT_LANG="$(node -e '
+const env = process.env;
+function pick(raw) {
+  if (!raw || typeof raw !== "string") return null;
+  const tag = raw.split(":")[0].trim().replace(/[.@].*$/, "").replace(/_/g, "-");
+  if (!tag || /^(?:c|posix)$/i.test(tag)) return null;
+  return /^zh(?:-|$)/i.test(tag) ? "zh-CN" : /^[a-z]{2,3}(?:-|$)/i.test(tag) ? "en" : null;
+}
+let out = null;
+for (const k of ["AG_TM_LANG", "LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"]) {
+  out = pick(env[k]);
+  if (out) break;
+}
+if (!out) {
+  try { out = pick(Intl.DateTimeFormat().resolvedOptions().locale); } catch {}
+}
+process.stdout.write(out || "zh-CN");
+')"
+  cat > "$CFG_DIR/preferences.json" <<EOF
 {
-  "language": "zh-CN",
+  "language": "$INIT_LANG",
   "theme": "swiss",
   "showSpeed": true,
   "showCache": true,
@@ -203,5 +221,5 @@ EOF
 fi
 
 echo ""
-echo "[完成] Antigravity TokenMeter v1.2.14 已安装至: $DST_PLUGIN"
+echo "[完成] Antigravity TokenMeter v1.2.15 已安装至: $DST_PLUGIN"
 echo "已在 config.json 中同时启用插件与 sidecar。"
