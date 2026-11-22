@@ -9,7 +9,7 @@
  * 4. 每次导航递增 docEpoch（兼容 Chromium 先创建新上下文再派发 frameNavigated 的事件时序），杜绝跨导航错投；
  * 5. 连接断开、页面导航与冷启动未挂载阶段启用自适应快速重探，挂载稳态回归低频巡检，状态文件原子替换。
  */
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import { dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -22,10 +22,10 @@ const BINDING_PREFIX = '__agTokenMeterCallV2';
 const WORLD_NAME = 'AntigravityTokenMeterWorld';
 
 const HUB_ROUTE_RE =
-  /^\/(?:$|c\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\/|$)|settings(?:\/|$)|customizations(?:\/|$)|welcome(?:\/|$)|onboarding(?:\/|$)|new(?:\/|$)|plugins(?:\/|$)|automations?(?:\/|$)|agents(?:\/|$))/i;
+  /^\/(?:$|c\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\/|$)|settings(?:\/|$)|customizations(?:\/|$)|welcome(?:\/|$)|onboarding(?:\/|$)|new(?:\/|$)|plugins(?:\/|$)|automations?(?:\/|$)|agents(?:\/|$)|projects(?:\/|$)|skills(?:\/|$)|marketplace(?:\/|$)|inbox(?:\/|$)|chat(?:\/|$))/i;
 
 const HUB_BUILTIN_TITLE_RE =
-  /^(?:welcome|settings|customizations|plugins|automations?|onboarding|new chat|new conversation|untitled|getting started|欢迎|设置|自定义|插件|自动化|新对话|新建对话|无标题)(?:\s*[-—–|·]\s*(?:welcome|settings|customizations|plugins|automations?|new chat|欢迎|设置|自定义|插件|新对话))?$/i;
+  /^(?:welcome|settings|customizations|plugins|automations?|onboarding|new chat|new conversation|untitled|getting started|projects|skills|marketplace|inbox|欢迎|设置|自定义|插件|自动化|新对话|新建对话|无标题|项目|技能|市场|收件箱)(?:\s*[-—–|·]\s*(?:welcome|settings|customizations|plugins|automations?|new chat|projects|skills|marketplace|欢迎|设置|自定义|插件|新对话|项目|技能|市场))?$/i;
 
 function hasOriginInSet(trustedOrigins, origin) {
   if (!trustedOrigins || !origin) return false;
@@ -142,9 +142,9 @@ export function validateBridgePayload(raw) {
 }
 
 /**
- * 零代理、带硬超时、单次结算、禁重定向的本地回环 JSON GET。
+ * 零代理、带硬超时、单次结算、禁重定向的本地回环 JSON GET（支持 IPv4 与 ::1 双栈回退）。
  */
-function fetchLocalJson(port, path, timeoutMs = 2500) {
+function fetchLocalJsonHost(hostname, port, path, timeoutMs = 1800) {
   return new Promise((resolve, reject) => {
     let settled = false;
     const finish = (err, val) => {
@@ -155,42 +155,44 @@ function fetchLocalJson(port, path, timeoutMs = 2500) {
       else resolve(val);
     };
 
-    const req = http.request({ hostname: '127.0.0.1', port, family: 4, path, method: 'GET', agent: false }, (res) => {
-      if (res.statusCode !== 200) {
-        req.destroy();
-        finish(new Error(`CDP HTTP ${res.statusCode || 0}`));
-        return;
-      }
-      const chunks = [];
-      let total = 0;
-      res.on('data', (chunk) => {
-        total += chunk.length;
-        if (total > 2 * 1024 * 1024) {
+    const req = http.request(
+      { hostname, port, family: hostname.includes(':') ? 6 : 4, path, method: 'GET', agent: false },
+      (res) => {
+        if (res.statusCode !== 200) {
           req.destroy();
-          finish(new Error('CDP 响应过大'));
+          finish(new Error(`CDP HTTP ${res.statusCode || 0}`));
           return;
         }
-        chunks.push(chunk);
-      });
-      res.on('aborted', () => finish(new Error('CDP 响应提前中断')));
-      res.on('error', (err) => finish(err));
-      res.on('end', () => {
-        try {
-          resolveJson(Buffer.concat(chunks, total).toString('utf8'));
-        } catch {
-          finish(new Error('CDP 返回非法 JSON'));
-        }
-      });
-      function resolveJson(text) {
-        const parsed = JSON.parse(text);
-        if (!Array.isArray(parsed)) throw new Error('not array');
-        finish(null, parsed);
+        const chunks = [];
+        let total = 0;
+        res.on('data', (chunk) => {
+          total += chunk.length;
+          if (total > 2 * 1024 * 1024) {
+            req.destroy();
+            finish(new Error('CDP 响应过大'));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        res.on('aborted', () => finish(new Error('CDP 响应提前中断')));
+        res.on('error', (err) => finish(err));
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(Buffer.concat(chunks, total).toString('utf8'));
+            if (!Array.isArray(parsed)) throw new Error('not array');
+            finish(null, parsed);
+          } catch {
+            finish(new Error('CDP 返回非法 JSON'));
+          }
+        });
       }
-    });
+    );
 
     const hardTimer = setTimeout(() => {
       req.destroy();
-      finish(new Error('CDP 请求超时'));
+      const err = new Error('CDP 请求超时');
+      err.code = 'ETIMEDOUT';
+      finish(err);
     }, timeoutMs);
     hardTimer.unref?.();
 
@@ -199,64 +201,125 @@ function fetchLocalJson(port, path, timeoutMs = 2500) {
   });
 }
 
+async function fetchLocalJson(port, path, timeoutMs = 1800) {
+  try {
+    return await fetchLocalJsonHost('127.0.0.1', port, path, timeoutMs);
+  } catch (err) {
+    if (err?.code === 'ECONNREFUSED') {
+      try {
+        return await fetchLocalJsonHost('::1', port, path, Math.min(800, timeoutMs));
+      } catch {
+        throw err;
+      }
+    }
+    throw err;
+  }
+}
+
 /**
- * 依次尝试全部候选 profile 目录：遇到过期端口或不可达端点继续尝试下一个，不锁死发现流程。
- * 在同一 CDP 实例内执行两趟同源收敛：一旦任一窗口被确认为可信 Hub 源，同源的多开新窗口/设置页一并放行。
+ * 原子写入集成状态文件（自动创建父目录、兼容 Windows EPERM/EBUSY 瞬时锁冲突重试）。
+ */
+export async function writeStatusFileAtomic(statusFile, payload) {
+  if (!statusFile) return false;
+  const tmp = `${statusFile}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+  try {
+    await mkdir(dirname(statusFile), { recursive: true });
+    await writeFile(tmp, JSON.stringify(payload, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
+    for (let i = 0; i < 4; i++) {
+      try {
+        await rename(tmp, statusFile);
+        return true;
+      } catch (err) {
+        const transient = err?.code === 'EPERM' || err?.code === 'EBUSY' || err?.code === 'EACCES';
+        if (!transient || i === 3) throw err;
+        await new Promise((r) => setTimeout(r, 40 * (i + 1)));
+      }
+    }
+    return true;
+  } catch {
+    try { await unlink(tmp); } catch {}
+    return false;
+  }
+}
+
+/**
+ * 并发容错探测全部候选 profile 目录：
+ * - 支持多目录并发读取与探测，单个僵死端口绝不阻塞其余有效目录；
+ * - 遇到过期端口或无匹配目标的端点自动回退下一个候选目录；
+ * - 在同一 CDP 实例内执行两趟同源收敛：一旦任一窗口被确认为可信 Hub 源，同源的多开新窗口/设置页一并放行。
  * @param {string[]} profileCandidates
  * @param {{ expectedHubPort?: number | null, trustedOrigins?: Set<string> | string[] | null }} [opts]
  */
 export async function discoverHubTargets(profileCandidates, { expectedHubPort = null, trustedOrigins = null } = {}) {
-  let sawValidPortFile = false;
-  let lastReachablePort = null;
-  let lastError = null;
-
-  for (const dir of profileCandidates) {
-    if (!dir) continue;
-    const file = join(dir, 'DevToolsActivePort');
-    let content;
-    try {
-      content = await readFile(file, 'utf8');
-    } catch {
-      continue;
-    }
-    if (content.length > 1024) continue;
-    const lines = content.split(/\r?\n/);
-    const portStr = (lines[0] || '').trim();
-    const wsPath = (lines[1] || '').trim();
-    if (!PORT_STR_RE.test(portStr)) continue;
-    const port = Number(portStr);
-    if (port < 1 || port > 65535) continue;
-    if (wsPath && !wsPath.startsWith('/devtools/')) continue;
-
-    sawValidPortFile = true;
-    try {
-      const targets = await fetchLocalJson(port, '/json/list');
-      lastReachablePort = port;
-      const mergedOrigins = new Set(
-        trustedOrigins instanceof Set ? trustedOrigins : Array.isArray(trustedOrigins) ? trustedOrigins : []
-      );
-      for (const t of targets) {
-        if (isTrustedHubTarget(t, port, expectedHubPort, { trustedOrigins: mergedOrigins })) {
-          try { mergedOrigins.add(new URL(t.url).origin); } catch {}
+  const dirs = Array.isArray(profileCandidates) ? profileCandidates.filter(Boolean) : [];
+  const parsedEntries = (
+    await Promise.all(
+      dirs.map(async (dir, index) => {
+        const file = join(dir, 'DevToolsActivePort');
+        try {
+          const [content, st] = await Promise.all([
+            readFile(file, 'utf8'),
+            stat(file).catch(() => null),
+          ]);
+          if (content.length > 1024) return null;
+          const lines = content.replace(/^\uFEFF/, '').split(/\r?\n/);
+          const portStr = (lines[0] || '').trim();
+          const wsPath = (lines[1] || '').trim();
+          if (!PORT_STR_RE.test(portStr)) return null;
+          const port = Number(portStr);
+          if (port < 1 || port > 65535) return null;
+          if (wsPath && !wsPath.startsWith('/devtools/')) return null;
+          return { dir, file, port, index, mtimeMs: st?.mtimeMs || 0 };
+        } catch {
+          return null;
         }
-      }
-      const trusted = targets.filter((t) => isTrustedHubTarget(t, port, expectedHubPort, { trustedOrigins: mergedOrigins }));
-      if (trusted.length > 0) {
-        return { port, activePortFile: file, targets: trusted };
-      }
-    } catch (err) {
-      lastError = err;
-    }
-  }
+      })
+    )
+  ).filter(Boolean);
 
-  if (lastReachablePort !== null) {
-    return { port: lastReachablePort, activePortFile: null, targets: [] };
-  }
-  if (!sawValidPortFile) {
+  if (parsedEntries.length === 0) {
     const err = new Error('no_active_port');
     err.diagCode = 'no_active_port';
     throw err;
   }
+
+  // 并发探测所有解析到端口文件的目录（避免前序过期/挂起端口拖慢后序存活目录）
+  const probed = await Promise.all(
+    parsedEntries.map(async (entry) => {
+      try {
+        const targets = await fetchLocalJson(entry.port, '/json/list');
+        const mergedOrigins = new Set(
+          trustedOrigins instanceof Set ? trustedOrigins : Array.isArray(trustedOrigins) ? trustedOrigins : []
+        );
+        for (const t of targets) {
+          if (isTrustedHubTarget(t, entry.port, expectedHubPort, { trustedOrigins: mergedOrigins })) {
+            try { mergedOrigins.add(new URL(t.url).origin); } catch {}
+          }
+        }
+        const trusted = targets.filter((t) => isTrustedHubTarget(t, entry.port, expectedHubPort, { trustedOrigins: mergedOrigins }));
+        return { ok: true, entry, trusted, err: null };
+      } catch (err) {
+        return { ok: false, entry, trusted: [], err };
+      }
+    })
+  );
+
+  // 优先选择有可信窗口的目录（保持候选列表顺序，显式配置优先）
+  const matched = probed.find((r) => r.ok && r.trusted.length > 0);
+  if (matched) {
+    return {
+      port: matched.entry.port,
+      activePortFile: matched.entry.file,
+      targets: matched.trusted,
+    };
+  }
+
+  const reachable = probed.find((r) => r.ok);
+  if (reachable) {
+    return { port: reachable.entry.port, activePortFile: null, targets: [] };
+  }
+
+  const lastError = probed.find((r) => r.err)?.err || null;
   const err = new Error(lastError?.message || 'stale_port');
   err.diagCode = 'stale_port';
   throw err;
@@ -450,6 +513,7 @@ export class CdpInlineBridge {
     setPrefs,
     getExpectedHubPort = () => null,
     isEnabled = () => true,
+    getDisabledMeta = null,
     hasOwnership = () => true,
     discover = discoverHubTargets,
     createSession = (url, opts) => new CdpSession(url, opts),
@@ -462,6 +526,7 @@ export class CdpInlineBridge {
     this.setPrefs = setPrefs;
     this.getExpectedHubPort = getExpectedHubPort;
     this.isEnabled = isEnabled;
+    this.getDisabledMeta = getDisabledMeta;
     this.hasOwnership = hasOwnership;
     this.discover = discover;
     this.createSession = createSession;
@@ -478,6 +543,7 @@ export class CdpInlineBridge {
     this.sessions = new Map();
     this.trustedOrigins = new Set();
     this._lastCdpPort = null;
+    this._lastStatusCode = 'starting';
     this.running = false;
     this.stopping = false;
     this.busy = false;
@@ -494,6 +560,13 @@ export class CdpInlineBridge {
       pid: process.pid,
       checkedAt: new Date().toISOString(),
     };
+  }
+
+  _scheduleColdStartRetry(baseDelayMs = 450, maxRetries = 24) {
+    if (this._fastRetryCount >= maxRetries) return;
+    this._fastRetryCount++;
+    const delayMs = this._fastRetryCount <= 10 ? baseDelayMs : Math.max(baseDelayMs, 900);
+    this._scheduleFastTick(delayMs);
   }
 
   _scheduleFastTick(delayMs = 180) {
@@ -513,6 +586,13 @@ export class CdpInlineBridge {
   }
 
   async _updateStatus(state, code, extra = {}) {
+    if (code !== this._lastStatusCode) {
+      this._lastStatusCode = code;
+      // 阶段推进（如 starting -> no_hub_page -> waiting_composer）刷新冷启动快速重探计数，实现首装秒级挂载
+      if (code === 'no_hub_page' || code === 'waiting_composer') {
+        this._fastRetryCount = 0;
+      }
+    }
     this.status = {
       state,
       code,
@@ -522,23 +602,7 @@ export class CdpInlineBridge {
       ...extra,
     };
     if (this.statusFile && this.hasOwnership()) {
-      const tmp = `${this.statusFile}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
-      try {
-        await mkdir(dirname(this.statusFile), { recursive: true });
-        await writeFile(tmp, JSON.stringify(this.status, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
-        for (let i = 0; i < 4; i++) {
-          try {
-            await rename(tmp, this.statusFile);
-            break;
-          } catch (err) {
-            const transient = err?.code === 'EPERM' || err?.code === 'EBUSY' || err?.code === 'EACCES';
-            if (!transient || i === 3) throw err;
-            await new Promise((r) => setTimeout(r, 40 * (i + 1)));
-          }
-        }
-      } catch {
-        try { await unlink(tmp); } catch {}
-      }
+      await writeStatusFileAtomic(this.statusFile, this.status);
     }
   }
 
@@ -805,7 +869,8 @@ export class CdpInlineBridge {
         if (!this.isEnabled()) {
           this.trustedOrigins.clear();
           await this.detachAll();
-          await this._updateStatus('disabled', 'inline_disabled', { cdpPort: null });
+          const meta = typeof this.getDisabledMeta === 'function' ? (this.getDisabledMeta() || {}) : {};
+          await this._updateStatus('disabled', 'inline_disabled', { cdpPort: null, ...meta });
           return;
         }
 
@@ -814,10 +879,7 @@ export class CdpInlineBridge {
         if (expectedHubPort === null) {
           // 未确认宿主 LS 端口前不向任意回环页面盲目附加，杜绝误连其他本地网页
           await this._updateStatus('reconnecting', 'starting', { cdpPort: null });
-          if (this._fastRetryCount < 12) {
-            this._fastRetryCount++;
-            this._scheduleFastTick(500);
-          }
+          this._scheduleColdStartRetry(450, 24);
           return;
         }
 
@@ -901,24 +963,15 @@ export class CdpInlineBridge {
           await this._updateStatus('mounted', 'mounted', { cdpPort: discovered.port, mountedWindows });
         } else if (this.sessions.size > 0) {
           await this._updateStatus('waiting_composer', 'waiting_composer', { cdpPort: discovered.port, mountedWindows: 0 });
-          if (this._fastRetryCount < 8) {
-            this._fastRetryCount++;
-            this._scheduleFastTick(600);
-          }
+          this._scheduleColdStartRetry(550, 16);
         } else {
           await this._updateStatus('no_hub_page', 'no_hub_page', { cdpPort: discovered.port, mountedWindows: 0 });
-          if (this._fastRetryCount < 10) {
-            this._fastRetryCount++;
-            this._scheduleFastTick(600);
-          }
+          this._scheduleColdStartRetry(500, 20);
         }
       } catch (err) {
         const code = err?.diagCode || 'cdp_unreachable';
         await this._updateStatus('reconnecting', code, { cdpPort: null });
-        if (this._fastRetryCount < 8) {
-          this._fastRetryCount++;
-          this._scheduleFastTick(700);
-        }
+        this._scheduleColdStartRetry(600, 18);
       } finally {
         this.busy = false;
         this._inflightTick = null;

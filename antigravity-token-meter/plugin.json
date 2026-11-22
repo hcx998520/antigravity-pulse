@@ -1,8 +1,9 @@
 {
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "antigravity-token-meter",
-  "display_name": "TokenMeter 速率与用量监控",
+  "displayName": "TokenMeter 速率与用量监控",
   "description": "开源的 Antigravity 实时 Token 速率 (tok/s)、Thinking 输出统计、缓存命中率、上下文窗口与额度监控插件（MIT License，支持 Antigravity 2.33+）",
-  "version": "1.2.15",
+  "version": "1.2.16",
   "license": "MIT",
   "logo": "assets/logo.svg"
 }

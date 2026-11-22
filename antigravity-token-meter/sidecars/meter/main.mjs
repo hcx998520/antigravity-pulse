@@ -10,50 +10,119 @@
  *    - 默认只读（不篡改真实账本与偏好），并要求随机会话 Token 鉴权。
  */
 import { createServer } from 'node:http';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 
-import { resolvePaths, readPluginFlags } from './src/paths.mjs';
+import { resolvePaths, readPluginFlags, resolveSidecarSdkCandidates } from './src/paths.mjs';
 import { OwnerLease, isPidAlive } from './src/owner-lock.mjs';
 import { LanguageServerClient, isLoopbackPortOpen } from './src/ls-client.mjs';
 import { projectUserStatus, selectQuotaPair, computeConversationTelemetry } from './src/telemetry.mjs';
 import { UsageLedger } from './src/ledger.mjs';
 import { PreferencesStore } from './src/prefs.mjs';
-import { CdpInlineBridge } from './src/cdp-bridge.mjs';
+import { CdpInlineBridge, writeStatusFileAtomic } from './src/cdp-bridge.mjs';
 import { I18N_DICT } from './src/i18n.mjs';
 import { buildInlineWidgetScript } from './src/ui/inline-bar.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const PKG = JSON.parse(readFileSync(join(HERE, 'package.json'), 'utf8'));
-const VERSION = String(PKG.version || '1.2.15');
 const IS_HOST_SIDECAR = Boolean(process.env.ANTIGRAVITY_SIDECAR_WEB_PORT);
 const IS_PREVIEW = process.argv.includes('--preview');
+const HAS_SIDECAR_CONTEXT = IS_HOST_SIDECAR || Boolean(process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR);
 const PROCESS_STARTED_AT = Date.now();
+const paths = resolvePaths();
+
+function sanitizeDiagnosticMessage(err) {
+  let text = err instanceof Error ? (err.message || err.name) : String(err || 'unknown_error');
+  for (const secretKey of ['ANTIGRAVITY_CSRF_TOKEN', 'ANTIGRAVITY_SIDECAR_UI_TOKEN']) {
+    const secret = process.env[secretKey];
+    if (secret && secret.length >= 6) {
+      text = text.split(secret).join('[REDACTED]');
+    }
+  }
+  return text.replace(/[\r\n]+/g, ' ').trim().slice(0, 240);
+}
+
+function hasLiveHealthyOwnerStatus(statusFile) {
+  if (!statusFile || !existsSync(statusFile)) return false;
+  try {
+    const prev = JSON.parse(readFileSync(statusFile, 'utf8').replace(/^\uFEFF/, ''));
+    if (!prev || typeof prev !== 'object') return false;
+    const prevPid = Number(prev.pid);
+    if (!Number.isInteger(prevPid) || prevPid <= 0 || prevPid === process.pid) return false;
+    if (prev.state === 'error') return false;
+    const ageMs = Math.abs(Date.now() - Date.parse(prev.checkedAt || ''));
+    return isPidAlive(prevPid) && Number.isFinite(ageMs) && ageMs < 30000;
+  } catch {
+    return false;
+  }
+}
+
+function writeStartupDiagnosticSync(code, err, stage = 'boot') {
+  const errorMessage = sanitizeDiagnosticMessage(err);
+  console.error(`[TokenMeter][${stage}][${code}] ${errorMessage}`);
+  if (!HAS_SIDECAR_CONTEXT || IS_PREVIEW || !paths.statusFile) return;
+  if (hasLiveHealthyOwnerStatus(paths.statusFile)) return;
+  const payload = {
+    state: 'error',
+    code,
+    stage,
+    errorMessage,
+    windows: 0,
+    cdpPort: null,
+    pid: process.pid,
+    checkedAt: new Date().toISOString(),
+  };
+  const tmp = `${paths.statusFile}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+  try {
+    mkdirSync(dirname(paths.statusFile), { recursive: true });
+    writeFileSync(tmp, JSON.stringify(payload, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
+    renameSync(tmp, paths.statusFile);
+  } catch {
+    try { unlinkSync(tmp); } catch {}
+  }
+}
 
 if (IS_HOST_SIDECAR && IS_PREVIEW) {
   console.error('[TokenMeter] 宿主 sidecar 模式与 --preview 模式互斥，已拒绝启动。');
   process.exit(1);
 }
 if (!IS_HOST_SIDECAR && !IS_PREVIEW) {
-  console.error('[TokenMeter] 未检测到 Antigravity sidecar 环境变量。如需独立本地只读预览，请执行: node main.mjs --preview');
+  const msg = '未检测到 Antigravity sidecar 环境变量（ANTIGRAVITY_SIDECAR_WEB_PORT）。如需独立本地只读预览，请执行: node main.mjs --preview';
+  if (HAS_SIDECAR_CONTEXT) {
+    writeStartupDiagnosticSync('missing_env', msg, 'env_check');
+  } else {
+    console.error(`[TokenMeter] ${msg}`);
+  }
   process.exit(1);
 }
 
-const paths = resolvePaths();
+let VERSION = '1.2.16';
+let PANEL_HTML = '';
+let PANEL_JS = '';
+try {
+  const PKG = JSON.parse(readFileSync(join(HERE, 'package.json'), 'utf8'));
+  VERSION = String(PKG.version || '1.2.16');
+  PANEL_HTML = readFileSync(join(HERE, 'src', 'ui', 'panel.html'), 'utf8');
+  PANEL_JS = readFileSync(join(HERE, 'src', 'ui', 'panel.js'), 'utf8');
+} catch (err) {
+  writeStartupDiagnosticSync('missing_assets', err, 'load_assets');
+  process.exit(1);
+}
+const I18N_JS = `window.__AG_TM_I18N__=${JSON.stringify(I18N_DICT)};`;
+
+if (IS_HOST_SIDECAR) {
+  try { mkdirSync(paths.dataDir, { recursive: true }); } catch {}
+  try { mkdirSync(paths.configDir, { recursive: true }); } catch {}
+}
+
 const lsClient = new LanguageServerClient();
 const ownerLease = IS_HOST_SIDECAR
   ? new OwnerLease(paths.ownerLockFile, { lsPort: lsClient.configuredEndpoint?.port ?? null })
   : null;
 const ledger = new UsageLedger(paths.ledgerFile, { readOnly: IS_PREVIEW });
 const prefsStore = new PreferencesStore(paths.prefsFile, { readOnly: IS_PREVIEW });
-
-const PANEL_HTML = readFileSync(join(HERE, 'src', 'ui', 'panel.html'), 'utf8');
-const PANEL_JS = readFileSync(join(HERE, 'src', 'ui', 'panel.js'), 'utf8');
-const I18N_JS = `window.__AG_TM_I18N__=${JSON.stringify(I18N_DICT)};`;
 
 // 仅缓存脱敏投影（不含邮箱、原始 userStatus 敏感字段），带 single-flight、短 TTL 与持久模型名映射兜底
 let userStatusProjection = null;
@@ -251,6 +320,8 @@ async function resolveIntegrationStatus(flags) {
     return {
       state: 'disabled',
       code: 'inline_disabled',
+      inlineSource: flags.inlineSource,
+      ...(flags.configError ? { configError: true } : {}),
       windows: 0,
       cdpPort: null,
       pid: process.pid,
@@ -457,25 +528,54 @@ const bridge = new CdpInlineBridge({
     const f = readPluginFlags(paths);
     return f.enabled && f.inline;
   },
+  getDisabledMeta: () => {
+    const f = readPluginFlags(paths);
+    return {
+      inlineSource: f.inlineSource,
+      ...(f.configError ? { configError: true } : {}),
+    };
+  },
   hasOwnership: () => (ownerLease ? ownerLease.owned : false),
 });
 
+function isSdkModValid(mod) {
+  return Boolean(mod && typeof mod.SidecarApp === 'function' && typeof mod.Response === 'function');
+}
+
 async function loadOfficialSidecarSdk() {
   try {
-    return await import('sidecar_sdk');
+    const mod = await import('sidecar_sdk');
+    if (isSdkModValid(mod)) return mod;
   } catch (err) {
-    if (err?.code !== 'ERR_MODULE_NOT_FOUND' && err?.code !== 'MODULE_NOT_FOUND') throw err;
-    const candidates = [
-      join(homedir(), '.gemini', 'antigravity', 'lib', 'node_modules', 'sidecar_sdk', 'index.mjs'),
-      join(homedir(), '.gemini', 'config', 'node_modules', 'sidecar_sdk', 'index.mjs'),
-    ];
-    for (const file of candidates) {
-      if (existsSync(file)) {
-        return await import(pathToFileURL(file).href);
-      }
-    }
-    throw new Error('未找到 Antigravity 官方 sidecar_sdk');
+    const fallbackCodes = new Set([
+      'ERR_MODULE_NOT_FOUND',
+      'MODULE_NOT_FOUND',
+      'ERR_UNSUPPORTED_ESM_URL_SCHEME',
+      'ERR_INVALID_MODULE_SPECIFIER',
+    ]);
+    if (!fallbackCodes.has(err?.code)) throw err;
   }
+
+  const candidates = resolveSidecarSdkCandidates({
+    platform: paths.platform,
+    home: paths.home,
+    env: process.env,
+    execArgv: process.execArgv,
+  });
+  let lastImportErr = null;
+  for (const file of candidates) {
+    if (!existsSync(file)) continue;
+    try {
+      const mod = await import(pathToFileURL(file).href);
+      if (isSdkModValid(mod)) return mod;
+    } catch (importErr) {
+      lastImportErr = importErr;
+    }
+  }
+  const detail = lastImportErr ? ` (${sanitizeDiagnosticMessage(lastImportErr)})` : '';
+  const err = new Error(`未找到 Antigravity 官方 sidecar_sdk（已检查 ${candidates.length} 处候选路径）${detail}`);
+  err.diagCode = 'sdk_not_found';
+  throw err;
 }
 
 function stripTransportQueryKeys(data) {
@@ -486,8 +586,56 @@ function stripTransportQueryKeys(data) {
 }
 
 if (IS_HOST_SIDECAR) {
-  const { SidecarApp, Response } = await loadOfficialSidecarSdk();
-  const app = new SidecarApp();
+  let bootStage = 'env_check';
+  let fatalHandled = false;
+
+  process.on('unhandledRejection', (reason) => {
+    console.error(`[TokenMeter][${bootStage}][unhandled_rejection] ${sanitizeDiagnosticMessage(reason)}`);
+  });
+  process.on('uncaughtException', (err) => {
+    if (fatalHandled) return;
+    fatalHandled = true;
+    const code =
+      bootStage === 'server_listen' || err?.code === 'EADDRINUSE' || err?.code === 'EACCES'
+        ? 'server_listen_failed'
+        : 'fatal_error';
+    writeStartupDiagnosticSync(code, err, bootStage);
+    if (ownerLease?.owned && ownerLease.leaseFile) {
+      try {
+        const cur = JSON.parse(readFileSync(ownerLease.leaseFile, 'utf8'));
+        if (cur?.token === ownerLease.token) unlinkSync(ownerLease.leaseFile);
+      } catch {}
+    }
+    process.exit(1);
+  });
+
+  if (!process.env.ANTIGRAVITY_LS_ADDRESS || !process.env.ANTIGRAVITY_CSRF_TOKEN) {
+    writeStartupDiagnosticSync(
+      'missing_env',
+      '缺少宿主注入的 ANTIGRAVITY_LS_ADDRESS 或 ANTIGRAVITY_CSRF_TOKEN 环境变量',
+      'env_check'
+    );
+    process.exit(1);
+  }
+
+  let SidecarApp;
+  let Response;
+  try {
+    bootStage = 'sdk_load';
+    ({ SidecarApp, Response } = await loadOfficialSidecarSdk());
+  } catch (err) {
+    writeStartupDiagnosticSync(err?.diagCode || 'sdk_not_found', err, bootStage);
+    process.exit(1);
+  }
+
+  let app;
+  try {
+    bootStage = 'sdk_init';
+    app = new SidecarApp();
+  } catch (err) {
+    writeStartupDiagnosticSync('missing_env', err, bootStage);
+    process.exit(1);
+  }
 
   const htmlHeaders = {
     'Cache-Control': 'no-store',
@@ -508,7 +656,17 @@ if (IS_HOST_SIDECAR) {
     }
   }, 'POST');
 
-  await app.run();
+  try {
+    bootStage = 'server_listen';
+    const webServer = await app.run();
+    webServer?.on?.('error', (err) => {
+      writeStartupDiagnosticSync('server_listen_failed', err, 'server_listen');
+    });
+    bootStage = 'running';
+  } catch (err) {
+    writeStartupDiagnosticSync('server_listen_failed', err, bootStage);
+    process.exit(1);
+  }
 
   let backfillRunning = false;
   let backfillTimer = null;
@@ -595,6 +753,7 @@ if (IS_HOST_SIDECAR) {
   }
 
   let claimRetryTimer = null;
+  let claimFastTimer = null;
   let hostLivenessTimer = null;
   let hostDownStreak = 0;
   let isShuttingDown = false;
@@ -644,25 +803,49 @@ if (IS_HOST_SIDECAR) {
     }
   };
 
-  const scheduleClaimRetry = () => {
-    if (claimRetryTimer || isShuttingDown) return;
-    claimRetryTimer = setInterval(() => {
-      void (async () => {
-        if (isShuttingDown) return;
-        if (await ownerLease.claim({ canTakeover: canTakeoverStaleOwner })) {
-          activateOwnership();
-        }
-      })();
-    }, 4000);
-    claimRetryTimer.unref?.();
-  };
-
-  const activateOwnership = () => {
+  const clearClaimTimers = () => {
+    if (claimFastTimer) {
+      clearTimeout(claimFastTimer);
+      claimFastTimer = null;
+    }
     if (claimRetryTimer) {
       clearInterval(claimRetryTimer);
       claimRetryTimer = null;
     }
+  };
+
+  const tryClaimAndActivate = async () => {
+    if (isShuttingDown) return;
+    if (await ownerLease.claim({ canTakeover: canTakeoverStaleOwner })) {
+      await activateOwnership();
+    }
+  };
+
+  const scheduleClaimRetry = () => {
+    if (claimRetryTimer || isShuttingDown) return;
+    if (!claimFastTimer) {
+      claimFastTimer = setTimeout(() => {
+        claimFastTimer = null;
+        void tryClaimAndActivate();
+      }, 800);
+      claimFastTimer.unref?.();
+    }
+    claimRetryTimer = setInterval(() => {
+      void tryClaimAndActivate();
+    }, 4000);
+    claimRetryTimer.unref?.();
+  };
+
+  const activateOwnership = async () => {
+    clearClaimTimers();
     void prefsStore.ensureInitialized().catch(() => {});
+    // 拿到主写租约后先同步等待初始心跳落盘再启动 bridge，彻底消除与首轮 tick() 的覆盖竞争
+    await writeStatusFileAtomic(paths.statusFile, {
+      ...bridge.status,
+      pid: process.pid,
+      checkedAt: new Date().toISOString(),
+    });
+    if (isShuttingDown || !ownerLease?.owned) return;
     // 解析 LS 端点完成后立即唤醒一次 bridge.tick()，将冷启动挂载延迟从 ~2.5s 缩短至百毫秒级
     void lsClient.resolveEndpoint(false).then((ep) => {
       if (ep && !isShuttingDown && ownerLease?.owned) {
@@ -694,7 +877,7 @@ if (IS_HOST_SIDECAR) {
   };
 
   if (await ownerLease.claim({ canTakeover: canTakeoverStaleOwner })) {
-    activateOwnership();
+    await activateOwnership();
   } else {
     // 若快速重启时旧租约尚未过 TTL 或由旧孤儿霸占，定期探测并安全接管
     scheduleClaimRetry();
@@ -707,7 +890,7 @@ if (IS_HOST_SIDECAR) {
       shutdownPromise = (async () => {
         const guard = setTimeout(() => process.exit(0), 8000);
         guard.unref?.();
-        if (claimRetryTimer) { clearInterval(claimRetryTimer); claimRetryTimer = null; }
+        clearClaimTimers();
         if (hostLivenessTimer) { clearInterval(hostLivenessTimer); hostLivenessTimer = null; }
         stopBackfillTimers();
         await bridge.stop();
@@ -721,8 +904,12 @@ if (IS_HOST_SIDECAR) {
 
   // 宿主失联与停用自毁守护：
   // 1. 用户在「自定义扩展」点击停用/卸载插件时（enabled=false），旧进程立即释放锁并退出，避免重新启用时新旧进程抢锁延迟；
-  // 2. Windows 下重启 Antigravity 时旧 sidecar 偶发残留为孤儿进程，若绑定的宿主 LS 端口连续 3 次（~30s）拒绝连接，则主动释放锁并体面退出。
+  // 2. Windows 下重启 Antigravity 时旧 sidecar 偶发残留为孤儿进程，若冷启动宽限期后绑定的宿主 LS 端口连续 3 次（~30s）拒绝连接，则主动释放锁并体面退出。
   const configuredLs = lsClient.configuredEndpoint;
+  const rawLsAddr = String(process.env.ANTIGRAVITY_LS_ADDRESS || '').trim().toLowerCase();
+  const livenessHost = /^(?:https?:\/\/)?localhost(?::\d+)?\/?$/.test(rawLsAddr)
+    ? 'localhost'
+    : (configuredLs?.hostname || '127.0.0.1');
   let livenessTick = 0;
   hostLivenessTimer = setInterval(() => {
     void (async () => {
@@ -735,7 +922,9 @@ if (IS_HOST_SIDECAR) {
       livenessTick++;
       if (livenessTick % 2 !== 0) return;
       if (!configuredLs || !configuredLs.port) return;
-      const alive = await isLoopbackPortOpen(configuredLs.port, configuredLs.hostname);
+      // 30 秒冷启动宽限期，防止宿主 LS 尚未完成绑定时误判宿主失联
+      if (Date.now() - PROCESS_STARTED_AT < 30000) return;
+      const alive = await isLoopbackPortOpen(configuredLs.port, livenessHost);
       if (alive) {
         hostDownStreak = 0;
         return;

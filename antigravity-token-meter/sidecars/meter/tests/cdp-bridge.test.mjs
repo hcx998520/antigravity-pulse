@@ -2,8 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import vm from 'node:vm';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { spawn } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import {
   CdpInlineBridge,
@@ -13,6 +15,9 @@ import {
   validateBridgePayload,
 } from '../src/cdp-bridge.mjs';
 import { LanguageServerClient, parseLoopbackEndpoint } from '../src/ls-client.mjs';
+
+const METER_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
+const PLUGIN_DIR = dirname(dirname(METER_DIR));
 
 function mockTarget(id = 'p1', cdpPort = 54321, hubPort = 53150) {
   return {
@@ -410,4 +415,347 @@ test('LanguageServerClient 支持外网超时时通过本地轨迹接口完成�
   // 单个慢 RPC 超时不应清空已解析成功的本地端点
   await assert.rejects(() => client.retrieveUserQuotaSummary(false, 1500), /rpc_timeout_RetrieveUserQuotaSummary/);
   assert.equal(client.currentEndpoint?.port, 53150);
+});
+
+test('LanguageServerClient 对纯 HTTP localhost 毫秒级从 HTTPS 切换至 HTTP，且 127.0.0.1 拒绝时自动回退 ::1', async () => {
+  const attempted = [];
+  const client = new LanguageServerClient({
+    env: {
+      ANTIGRAVITY_LS_ADDRESS: 'localhost:52296',
+      ANTIGRAVITY_CSRF_TOKEN: 'csrf-token',
+    },
+    rpcImpl: async ({ protocol, hostname, method }) => {
+      attempted.push(`${protocol}//${hostname}/${method}`);
+      if (hostname === '127.0.0.1') {
+        const err = new Error('connect ECONNREFUSED 127.0.0.1:52296');
+        err.code = 'ECONNREFUSED';
+        throw err;
+      }
+      if (hostname === '::1' && protocol === 'https:') {
+        const err = new Error('write EPROTO: wrong version number');
+        err.code = 'ERR_SSL_WRONG_VERSION_NUMBER';
+        throw err;
+      }
+      if (hostname === '::1' && protocol === 'http:') {
+        return { trajectorySummaries: {} };
+      }
+      throw new Error('unexpected');
+    },
+  });
+
+  const res = await client.getAllTrajectories(3000);
+  assert.deepEqual(res, { trajectorySummaries: {} });
+  assert.equal(client.currentEndpoint?.hostname, '::1');
+  assert.equal(client.currentEndpoint?.protocol, 'http:');
+  // 127.0.0.1 ECONNREFUSED 应立即跳过同主机的剩余探测并切换 ::1；::1 上 https 协议错应立即切 http
+  assert.deepEqual(attempted, [
+    'https://127.0.0.1/GetUserStatus',
+    'https://::1/GetUserStatus',
+    'http://::1/GetUserStatus',
+    'http://::1/GetAllCascadeTrajectories',
+  ]);
+});
+
+test('discoverHubTargets 兼容 UTF-8 BOM 端口文件与多候选目录并发容错，并识别 2.34+ 项目/市场路由', async (t) => {
+  assert.equal(
+    isTrustedHubTarget({ ...mockTarget('p', 58208, 65075), url: 'https://127.0.0.1:65075/projects', title: 'Projects' }, 58208, 53494),
+    true,
+  );
+  assert.equal(
+    isTrustedHubTarget({ ...mockTarget('p', 58208, 65075), url: 'https://127.0.0.1:65075/marketplace', title: '市场' }, 58208, 53494),
+    true,
+  );
+
+  const deadDir = await mkdtemp(join(tmpdir(), 'tm-cdp-dead-'));
+  const bomDir = await mkdtemp(join(tmpdir(), 'tm-cdp-bom-'));
+  t.after(async () => {
+    await rm(deadDir, { recursive: true, force: true });
+    await rm(bomDir, { recursive: true, force: true });
+  });
+
+  const server = http.createServer((req, res) => {
+    if (req.url === '/json/list') {
+      const port = server.address().port;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify([
+        {
+          type: 'page',
+          title: 'Antigravity',
+          url: 'https://127.0.0.1:64321/',
+          webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/page/main`,
+        },
+      ]));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => server.close());
+
+  await writeFile(join(deadDir, 'DevToolsActivePort'), '1\n/devtools/browser/dead\n', 'utf8');
+  await writeFile(join(bomDir, 'DevToolsActivePort'), `\uFEFF${server.address().port}\n/devtools/browser/live\n`, 'utf8');
+
+  const discovered = await discoverHubTargets([deadDir, bomDir], { expectedHubPort: 51000 });
+  assert.equal(discovered.port, server.address().port);
+  assert.equal(discovered.targets.length, 1);
+});
+
+test('plugin.json 与 sidecar.json 严格符合 Antigravity 2.33+/2.34+ 官方清单规范', async () => {
+  const pluginJson = JSON.parse(await readFile(join(PLUGIN_DIR, 'plugin.json'), 'utf8'));
+  assert.equal(pluginJson.$schema, 'https://antigravity.google/schemas/v1/plugin.json');
+  assert.equal(pluginJson.name, 'antigravity-token-meter');
+  assert.equal(typeof pluginJson.displayName, 'string');
+  assert.ok(pluginJson.displayName.length > 0);
+  assert.equal(Object.hasOwn(pluginJson, 'display_name'), false);
+  assert.equal(pluginJson.logo, 'assets/logo.svg');
+
+  const sidecarJson = JSON.parse(await readFile(join(METER_DIR, 'sidecar.json'), 'utf8'));
+  assert.equal(sidecarJson.command, 'node');
+  assert.deepEqual(sidecarJson.args, ['main.mjs']);
+  assert.equal(sidecarJson.restart_policy, 'always');
+  assert.equal(sidecarJson.has_web_ui, true);
+  assert.equal(sidecarJson.agent_permissions?.allows_user_interactions, false);
+  assert.equal(sidecarJson.ui_config?.views?.[0]?.entrypoint, 'SIDECAR_UI_ENTRYPOINT_AUX_PANE');
+});
+
+async function runMainProcess(env, { waitForExit = true, timeoutMs = 8000 } = {}) {
+  const child = spawn(process.execPath, [join(METER_DIR, 'main.mjs')], {
+    cwd: METER_DIR,
+    env: {
+      PATH: process.env.PATH,
+      SystemRoot: process.env.SystemRoot,
+      ...env,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (d) => { stdout += d.toString('utf8'); });
+  child.stderr.on('data', (d) => { stderr += d.toString('utf8'); });
+
+  if (!waitForExit) {
+    return {
+      child,
+      getOutput: () => ({ stdout, stderr }),
+    };
+  }
+
+  const exitCode = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch {}
+      reject(new Error(`main.mjs timed out: stderr=${stderr}`));
+    }, timeoutMs);
+    child.once('exit', (code) => {
+      clearTimeout(timer);
+      resolve(code);
+    });
+    child.once('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+  return { exitCode, stdout, stderr };
+}
+
+test('main.mjs 启动诊断：缺失 sidecar_sdk 或必需环境变量时原子落盘错误状态、脱敏且不覆盖存活主实例', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'tm-boot-diag-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const dataDir = join(root, '.gemini', 'antigravity', 'sidecar_data', 'antigravity-token-meter', 'meter', 'data');
+  const statusFile = join(dataDir, 'integration-status.json');
+  const secretToken = 'super-secret-csrf-987654321';
+
+  // 1. 缺失 sidecar_sdk：应退出非 0 且落盘 sdk_not_found
+  const rSdk = await runMainProcess({
+    USERPROFILE: root,
+    HOME: root,
+    APPDATA: join(root, 'AppData', 'Roaming'),
+    LOCALAPPDATA: join(root, 'AppData', 'Local'),
+    ANTIGRAVITY_SIDECAR_WEB_PORT: '0',
+    ANTIGRAVITY_LS_ADDRESS: '127.0.0.1:59999',
+    ANTIGRAVITY_CSRF_TOKEN: secretToken,
+    ANTIGRAVITY_EXECUTABLE_DATA_DIR: dataDir,
+  });
+  assert.notEqual(rSdk.exitCode, 0);
+  assert.match(rSdk.stderr, /sdk_not_found/);
+  const sdkStatus = JSON.parse(await readFile(statusFile, 'utf8'));
+  assert.equal(sdkStatus.state, 'error');
+  assert.equal(sdkStatus.code, 'sdk_not_found');
+  assert.equal(sdkStatus.stage, 'sdk_load');
+  assert.equal(sdkStatus.errorMessage.includes(secretToken), false);
+
+  // 2. 缺失 ANTIGRAVITY_LS_ADDRESS：应落盘 missing_env
+  const rEnv = await runMainProcess({
+    USERPROFILE: root,
+    HOME: root,
+    APPDATA: join(root, 'AppData', 'Roaming'),
+    LOCALAPPDATA: join(root, 'AppData', 'Local'),
+    ANTIGRAVITY_SIDECAR_WEB_PORT: '0',
+    ANTIGRAVITY_EXECUTABLE_DATA_DIR: dataDir,
+  });
+  assert.notEqual(rEnv.exitCode, 0);
+  const envStatus = JSON.parse(await readFile(statusFile, 'utf8'));
+  assert.equal(envStatus.state, 'error');
+  assert.equal(envStatus.code, 'missing_env');
+
+  // 3. 若已有存活健康主实例状态文件，异常子进程绝不覆写破坏
+  await writeFile(
+    statusFile,
+    JSON.stringify({
+      state: 'mounted',
+      code: 'mounted',
+      windows: 1,
+      pid: process.pid,
+      checkedAt: new Date().toISOString(),
+    }),
+    'utf8'
+  );
+  await runMainProcess({
+    USERPROFILE: root,
+    HOME: root,
+    APPDATA: join(root, 'AppData', 'Roaming'),
+    LOCALAPPDATA: join(root, 'AppData', 'Local'),
+    ANTIGRAVITY_SIDECAR_WEB_PORT: '0',
+    ANTIGRAVITY_EXECUTABLE_DATA_DIR: dataDir,
+  });
+  const preserved = JSON.parse(await readFile(statusFile, 'utf8'));
+  assert.equal(preserved.state, 'mounted');
+  assert.equal(preserved.pid, process.pid);
+});
+
+test('main.mjs 零配置端到端启动：含中文空格路径且无 settings.json 与 --import 时自动寻址 sidecar_sdk 并默认启用内嵌探测', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'tm-e2e-中文 路径-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const appDataDir = join(root, '.gemini', 'antigravity');
+  const sdkDir = join(appDataDir, 'lib', 'node_modules', 'sidecar_sdk');
+  const dataDir = join(appDataDir, 'sidecar_data', 'antigravity-token-meter', 'meter', 'data');
+  await mkdir(sdkDir, { recursive: true });
+  // 写入与官方 sidecar_sdk 契约一致的轻量测试桩（不依赖外部包）
+  await writeFile(
+    join(sdkDir, 'index.mjs'),
+    `import { createServer } from 'node:http';
+export class Response {
+  constructor(body, { contentType = 'text/plain', status = 200, headers } = {}) {
+    this.body = body; this.contentType = contentType; this.status = status; this.headers = headers;
+  }
+}
+export class SidecarApp {
+  #port; #apis = new Map(); #pages = new Map();
+  constructor() {
+    if (!process.env.ANTIGRAVITY_LS_ADDRESS || !process.env.ANTIGRAVITY_CSRF_TOKEN || !process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
+      throw new Error('Missing required env');
+    }
+    this.#port = parseInt(process.env.ANTIGRAVITY_SIDECAR_WEB_PORT, 10);
+  }
+  page(p, h) { this.#pages.set(p, h); }
+  api(p, h, m = 'POST') {
+    if (!this.#apis.has(p)) this.#apis.set(p, new Map());
+    this.#apis.get(p).set(m.toUpperCase(), h);
+  }
+  run() {
+    const server = createServer(async (req, res) => {
+      const u = new URL(req.url, 'http://127.0.0.1');
+      if (this.#apis.has(u.pathname) && this.#apis.get(u.pathname).has(req.method)) {
+        const result = await this.#apis.get(u.pathname).get(req.method)({});
+        if (result instanceof Response) {
+          res.writeHead(result.status || 200, { 'Content-Type': result.contentType });
+          res.end(result.body);
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+        return;
+      }
+      res.writeHead(404); res.end('Not found');
+    });
+    return new Promise((resolve) => {
+      server.listen(this.#port, '127.0.0.1', () => {
+        console.log('[sidecar] listening on 127.0.0.1:' + server.address().port);
+        resolve(server);
+      });
+    });
+  }
+}
+`,
+    'utf8'
+  );
+
+  // 启动模拟本地 LS HTTP 服务器
+  const lsServer = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    if (req.url.endsWith('/GetUserStatus')) {
+      res.end(JSON.stringify({ userStatus: { cascadeModelConfigData: { clientModelConfigs: [] } } }));
+    } else if (req.url.endsWith('/GetAllCascadeTrajectories')) {
+      res.end(JSON.stringify({ trajectorySummaries: {} }));
+    } else {
+      res.end('{}');
+    }
+  });
+  await new Promise((r) => lsServer.listen(0, '127.0.0.1', r));
+  t.after(() => lsServer.close());
+
+  const { child, getOutput } = await runMainProcess(
+    {
+      USERPROFILE: root,
+      HOME: root,
+      APPDATA: join(root, 'AppData', 'Roaming'),
+      LOCALAPPDATA: join(root, 'AppData', 'Local'),
+      XDG_CONFIG_HOME: join(root, '.config'),
+      XDG_DATA_HOME: join(root, '.local', 'share'),
+      ANTIGRAVITY_SIDECAR_WEB_PORT: '0',
+      ANTIGRAVITY_LS_ADDRESS: `127.0.0.1:${lsServer.address().port}`,
+      ANTIGRAVITY_CSRF_TOKEN: 'e2e-csrf-token',
+      ANTIGRAVITY_EXECUTABLE_DATA_DIR: dataDir,
+    },
+    { waitForExit: false }
+  );
+  t.after(() => {
+    try { child.kill('SIGTERM'); } catch {}
+  });
+
+  // 等待监听日志输出真实端口
+  let webPort = null;
+  const deadline = Date.now() + 6000;
+  while (Date.now() < deadline) {
+    const out = getOutput();
+    const m = out.stdout.match(/listening on 127\.0\.0\.1:(\d+)/);
+    if (m) {
+      webPort = Number(m[1]);
+      break;
+    }
+    if (child.exitCode !== null) {
+      assert.fail(`main.mjs exited unexpectedly (${child.exitCode}): ${out.stderr}`);
+    }
+    await new Promise((r) => setTimeout(r, 60));
+  }
+  assert.ok(webPort && webPort > 0, `未检测到监听端口: ${JSON.stringify(getOutput())}`);
+
+  // 调用 /api/snapshot 验证零配置开箱正常响应且默认开启内嵌探测（而非 inline_disabled）
+  const snap = await new Promise((resolve, reject) => {
+    const req = http.get(`http://127.0.0.1:${webPort}/api/snapshot`, (res) => {
+      let body = '';
+      res.on('data', (c) => { body += c; });
+      res.on('end', () => resolve({ status: res.statusCode, json: JSON.parse(body) }));
+    });
+    req.on('error', reject);
+  });
+  assert.equal(snap.status, 200);
+  assert.equal(snap.json.connected, true);
+  assert.notEqual(snap.json.integration?.code, 'inline_disabled');
+
+  // 等待 integration-status.json 落盘并核验其进入正常探测态（无 DevToolsActivePort 时为 no_active_port 或 starting）
+  const statusFile = join(dataDir, 'integration-status.json');
+  let diskStatus = null;
+  for (let i = 0; i < 20; i++) {
+    try {
+      diskStatus = JSON.parse(await readFile(statusFile, 'utf8'));
+      if (diskStatus && diskStatus.code === 'no_active_port') break;
+    } catch {}
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(diskStatus, '应自动创建并写入 integration-status.json');
+  assert.notEqual(diskStatus.code, 'inline_disabled');
+  assert.ok(['starting', 'no_active_port'].includes(diskStatus.code), `unexpected code: ${diskStatus.code}`);
 });

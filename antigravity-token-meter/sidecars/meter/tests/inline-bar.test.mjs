@@ -296,7 +296,7 @@ function createDomEnv(snapshot) {
 
 test('buildInlineWidgetScript 一格一卡按需聚焦弹窗且悬停切换互不串栏', async (t) => {
   const snapshot = {
-    version: '1.2.15',
+    version: '1.2.16',
     connected: true,
     preferences: {
       language: 'zh-CN',
@@ -476,7 +476,7 @@ test('buildInlineWidgetScript 一格一卡按需聚焦弹窗且悬停切换互�
 
 test('英文模式浮卡排版防溢出：进度条短标 5h/7d 无重叠、无多余空格且底栏宽窄自适应', async (t) => {
   const snapshot = {
-    version: '1.2.15',
+    version: '1.2.16',
     connected: true,
     preferences: {
       language: 'en',
@@ -580,7 +580,7 @@ test('英文模式浮卡排版防溢出：进度条短标 5h/7d 无重叠、无�
 test('新对话首页无 conversationId 时照常拉取全局额度与本月用量，绝不变灰或空白', async (t) => {
   let calledWith = 'UNSET';
   const snapshot = {
-    version: '1.2.15',
+    version: '1.2.16',
     connected: true,
     conversationUnavailable: true,
     conversation: null,
@@ -686,7 +686,7 @@ test('跨平台 CJK 字体栈、宿主原生字体统一、字号下限与 lang 
   }
 
   const snapshot = {
-    version: '1.2.15',
+    version: '1.2.16',
     connected: true,
     preferences: { language: 'zh-CN', theme: 'mono', showSpeed: true, showMonth: true, version: 1 },
     conversation: { model: 'Gemini 4 Carbon', latestTps: 98.5, tps: 98.5, sparkline: [{ tps: 98.5, ttft: 1.25, tokens: 320 }] },
@@ -744,7 +744,7 @@ test('跨平台 CJK 字体栈、宿主原生字体统一、字号下限与 lang 
 
 test('费用展示口径对齐与 <$0.01 微额高精度提示（含会话、缓存节省、今日模型、14天柱图微浮卡与统计弹窗）', async (t) => {
   const snapshot = {
-    version: '1.2.15',
+    version: '1.2.16',
     connected: true,
     preferences: {
       language: 'zh-CN',
@@ -868,7 +868,7 @@ test('费用展示口径对齐与 <$0.01 微额高精度提示（含会话、缓
 
 test('前端交互体验：Esc 精准关闭弹窗/浮卡并阻断冒泡防误停生成，点击外部立即收起', async (t) => {
   const snapshot = {
-    version: '1.2.15',
+    version: '1.2.16',
     connected: true,
     preferences: { language: 'zh-CN', theme: 'glass', showSpeed: true, showQuota: true, version: 1 },
     conversation: { model: 'Gemini 4 Neon', running: true, latestTps: 128.0, tps: 128.0, sparkline: [{ tps: 120 }, { tps: 128 }] },
@@ -934,7 +934,7 @@ test('前端交互体验：Esc 精准关闭弹窗/浮卡并阻断冒泡防误停
 test('computeBarLayout 首项 leadStar 解耦与 7 字符大额 Token（如 892.34M）宽度预算核验', async (t) => {
   // 关闭 showSpeed，仅开启 cache + month（首项变为 cache，自动承担 leadStar 额外宽度）
   const snapshot = {
-    version: '1.2.15',
+    version: '1.2.16',
     connected: true,
     preferences: {
       language: 'zh-CN',

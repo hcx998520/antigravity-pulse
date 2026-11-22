@@ -16,18 +16,7 @@ const SERVICE_PREFIX = '/exa.language_server_pb.LanguageServerService/';
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 const MAX_RPC_BYTES = 16 * 1024 * 1024;
 
-/**
- * 极速检测本地回环端口是否仍在监听（零代理、仅允许回环地址，用于判断宿主 LS 是否已退出）。
- * @param {number} port
- * @param {string} [hostname]
- * @param {number} [timeoutMs]
- */
-export function isLoopbackPortOpen(port, hostname = '127.0.0.1', timeoutMs = 800) {
-  const cleanHost = String(hostname || '127.0.0.1').replace(/^\[|\]$/g, '');
-  if (!LOOPBACK.has(cleanHost) || !Number.isInteger(port) || port < 1 || port > 65535) {
-    return Promise.resolve(false);
-  }
-  const host = cleanHost === 'localhost' ? '127.0.0.1' : cleanHost;
+function probeSingleLoopbackPort(host, port, timeoutMs) {
   return new Promise((resolve) => {
     let settled = false;
     const done = (ok) => {
@@ -38,11 +27,35 @@ export function isLoopbackPortOpen(port, hostname = '127.0.0.1', timeoutMs = 800
       resolve(ok);
     };
     const sock = net.createConnection({ host, port, family: host.includes(':') ? 6 : 4 });
-    const timer = setTimeout(() => done(false), Math.max(150, Math.min(3000, timeoutMs)));
+    const timer = setTimeout(() => done(false), Math.max(120, Math.min(3000, timeoutMs)));
     timer.unref?.();
     sock.once('connect', () => done(true));
     sock.once('error', () => done(false));
   });
+}
+
+/**
+ * 极速检测本地回环端口是否仍在监听（零代理、仅允许回环地址，localhost 自动兼容 IPv4/IPv6 双栈，用于判断宿主 LS 是否已退出）。
+ * @param {number} port
+ * @param {string} [hostname]
+ * @param {number} [timeoutMs]
+ */
+export async function isLoopbackPortOpen(port, hostname = '127.0.0.1', timeoutMs = 800) {
+  const cleanHost = String(hostname || '127.0.0.1').replace(/^\[|\]$/g, '');
+  if (!LOOPBACK.has(cleanHost) || !Number.isInteger(port) || port < 1 || port > 65535) {
+    return false;
+  }
+  const budget = Math.max(150, Math.min(3000, Number(timeoutMs) || 800));
+  if (cleanHost !== 'localhost') {
+    return probeSingleLoopbackPort(cleanHost, port, budget);
+  }
+  const startedAt = Date.now();
+  if (await probeSingleLoopbackPort('127.0.0.1', port, budget)) {
+    return true;
+  }
+  const remaining = budget - (Date.now() - startedAt);
+  if (remaining < 120) return false;
+  return probeSingleLoopbackPort('::1', port, remaining);
 }
 
 export function parseLoopbackEndpoint(rawAddr) {
@@ -203,49 +216,64 @@ export class LanguageServerClient {
       const envCsrf = this.env.ANTIGRAVITY_CSRF_TOKEN;
       if (!envAddr || !envCsrf) return null;
 
+      const rawAddr = String(this.env.ANTIGRAVITY_LS_ADDRESS || '').trim().toLowerCase();
+      const isLocalhostAlias = /^(?:https?:\/\/)?localhost(?::\d+)?\/?$/.test(rawAddr);
+      const hostCandidates = isLocalhostAlias ? ['127.0.0.1', '::1'] : [envAddr.hostname];
       const protocols = envAddr.protocol ? [envAddr.protocol] : ['https:', 'http:'];
       const probes = [
         { method: 'GetUserStatus', body: { metadata: { ideName: 'antigravity' } }, capMs: 1800 },
         { method: 'GetAllCascadeTrajectories', body: {}, capMs: 1600 },
       ];
 
-      for (const protocol of protocols) {
-        for (let i = 0; i < probes.length; i++) {
-          const remaining = deadlineMs - Date.now();
-          if (remaining < 250) break;
-          const probe = probes[i];
-          try {
-            await this.rpcImpl({
-              protocol,
-              hostname: envAddr.hostname,
-              port: envAddr.port,
-              csrfToken: envCsrf,
-              method: probe.method,
-              body: probe.body,
-              timeoutMs: Math.min(probe.capMs, remaining),
-            });
-            this._generation++;
-            this._resolved = {
-              protocol,
-              hostname: envAddr.hostname,
-              port: envAddr.port,
-              csrfToken: envCsrf,
-              generation: this._generation,
-            };
-            return this._resolved;
-          } catch (err) {
-            // 若端口拒绝连接、TLS 握手不匹配或 CSRF 鉴权失败，直接切换下一个协议，无需在同一协议重复探测
-            const code = err?.code || '';
-            const status = err?.statusCode || 0;
-            const protocolOrConnErr =
-              code === 'ECONNREFUSED' ||
-              code === 'ECONNRESET' ||
-              code.startsWith('ERR_SSL_') ||
-              code === 'EPROTO' ||
-              status === 401 ||
-              status === 403;
-            if (protocolOrConnErr) break;
+      for (const hostname of hostCandidates) {
+        let hostRefused = false;
+        for (const protocol of protocols) {
+          for (let i = 0; i < probes.length; i++) {
+            const remaining = deadlineMs - Date.now();
+            if (remaining < 250) break;
+            const probe = probes[i];
+            try {
+              await this.rpcImpl({
+                protocol,
+                hostname,
+                port: envAddr.port,
+                csrfToken: envCsrf,
+                method: probe.method,
+                body: probe.body,
+                timeoutMs: Math.min(probe.capMs, remaining),
+              });
+              this._generation++;
+              this._resolved = {
+                protocol,
+                hostname,
+                port: envAddr.port,
+                csrfToken: envCsrf,
+                generation: this._generation,
+              };
+              return this._resolved;
+            } catch (err) {
+              // 若端口拒绝连接、TLS 握手不匹配或 CSRF 鉴权失败，立刻切换协议或下一回环协议栈，不浪费剩余超时预算
+              const code = String(err?.code || '');
+              const msg = String(err?.message || '');
+              const status = err?.statusCode || 0;
+              if (code === 'ECONNREFUSED') {
+                hostRefused = true;
+                break;
+              }
+              const protocolOrConnErr =
+                code === 'ECONNRESET' ||
+                code === 'EPIPE' ||
+                code === 'EPROTO' ||
+                code === 'HPE_INVALID_CONSTANT' ||
+                code.startsWith('ERR_SSL_') ||
+                code.startsWith('ERR_TLS_') ||
+                /ssl|tls|wrong version|socket hang up|protocol/i.test(msg) ||
+                status === 401 ||
+                status === 403;
+              if (protocolOrConnErr) break;
+            }
           }
+          if (hostRefused) break;
         }
       }
       return null;

@@ -26,6 +26,7 @@ export class OwnerLease {
     this.token = randomUUID();
     this.startedAt = Date.now();
     this.owned = false;
+    this.lastError = null;
     this._timer = null;
   }
 
@@ -99,15 +100,23 @@ export class OwnerLease {
   async claim({ canTakeover } = {}) {
     if (!this.leaseFile) {
       this.owned = true;
+      this.lastError = null;
       return true;
     }
-    await mkdir(dirname(this.leaseFile), { recursive: true });
+    try {
+      await mkdir(dirname(this.leaseFile), { recursive: true });
+    } catch (err) {
+      this.owned = false;
+      this.lastError = err?.code || err?.message || 'mkdir_failed';
+      return false;
+    }
 
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const created = await this._tryCreateAtomic();
         if (created) {
           this.owned = true;
+          this.lastError = null;
           return true;
         }
         const existing = await this._readLease();
@@ -121,6 +130,11 @@ export class OwnerLease {
             deadOrExpired = true;
           }
         } else {
+          if (existing.token === this.token && existing.pid === process.pid) {
+            this.owned = true;
+            this.lastError = null;
+            return true;
+          }
           const heartbeatAge = Date.now() - Number(existing.heartbeatAt || 0);
           deadOrExpired = !isPidAlive(existing.pid) || heartbeatAge > LEASE_TTL_MS * 2;
           if (!deadOrExpired && typeof canTakeover === 'function' && existing.token !== this.token) {
@@ -139,6 +153,7 @@ export class OwnerLease {
         }
         if (!deadOrExpired) {
           this.owned = false;
+          this.lastError = null;
           return false;
         }
         for (let u = 0; u < 3; u++) {
@@ -151,8 +166,9 @@ export class OwnerLease {
             await new Promise((r) => setTimeout(r, 35 * (u + 1)));
           }
         }
-      } catch {
+      } catch (err) {
         this.owned = false;
+        this.lastError = err?.code || err?.message || 'claim_failed';
         return false;
       }
     }
